@@ -153,12 +153,11 @@ def compute_theoretical_coverage(data, view: str, group_by: str, unit: str) -> p
 
     merged = merged.rename(columns={"Allocated": "Coverage"})
     merged = merged.rename(columns={"Required": "Required"})
-    merged["Gap"] = merged["Coverage"] - merged["Required"]
 
     column_order = ["Region"]
     if group_key == "office_uuid":
         column_order.append("Office")
-    column_order.extend(["Process", "Required", "Coverage", "Gap"])
+    column_order.extend(["Process", "Required", "Coverage"])
 
     return merged[column_order].sort_values(by=column_order[:-3])
 
@@ -297,6 +296,18 @@ def compute_attendance_impact_details(
     return df.sort_values(sort_columns).reset_index(drop=True)
 
 
+def format_week_label(week_start: date) -> str:
+    """Return the display label used for weekly coverage buckets."""
+
+    week_end = week_start + timedelta(days=6)
+    if week_start.month == week_end.month:
+        return f"{week_start.day}-{week_end.day} {week_end.strftime('%b').upper()}"
+    return (
+        f"{week_start.day} {week_start.strftime('%b').upper()}-"
+        f"{week_end.day} {week_end.strftime('%b').upper()}"
+    )
+
+
 def _attendance_factor(attendances: List[AttendanceRecord], employee_uuid: str, week_start: date) -> float:
     week_end = week_start + timedelta(days=6)
     for record in attendances:
@@ -336,11 +347,7 @@ def compute_live_coverage(
     for support in support_allocations:
         support_lookup[support.allocation_uuid].append(support)
 
-    required_col = "Required"
-
     results = coverage_df.rename(columns={"Coverage": "Theoretical"}).copy()
-    if "Gap" in results.columns:
-        results["Gap"] = results["Theoretical"] - results["Required"]
 
     week_labels = []
 
@@ -369,12 +376,7 @@ def compute_live_coverage(
                 )
                 weekly_hours[key] += hours
 
-        week_end = week_start + timedelta(days=6)
-        if week_start.month == week_end.month:
-            label = f"{week_start.day}-{week_end.day} {week_end.strftime('%b').upper()}"
-        else:
-            label = f"{week_start.day} {week_start.strftime('%b').upper()}-{week_end.day} {week_end.strftime('%b').upper()}"
-        column_label = label
+        column_label = format_week_label(week_start)
         week_labels.append(column_label)
         results[column_label] = 0.0
         for (region, office_name, process_name, group), value in weekly_hours.items():
@@ -392,14 +394,7 @@ def compute_live_coverage(
 
             counts = get_jira_counts(process.uuid)
             for count in counts:
-                week_end = count.week_start + timedelta(days=6)
-                if count.week_start.month == week_end.month:
-                    label = f"{count.week_start.day}-{week_end.day} {week_end.strftime('%b').upper()}"
-                else:
-                    label = (
-                        f"{count.week_start.day} {count.week_start.strftime('%b').upper()}-"
-                        f"{week_end.day} {week_end.strftime('%b').upper()}"
-                    )
+                label = format_week_label(count.week_start)
                 jira_map[(process.uuid, label, "ticket_count")]["tickets"] = count.ticket_count
 
         for column in results.columns:
@@ -409,14 +404,7 @@ def compute_live_coverage(
         for process in processes:
             process_name = process.name
             for week_start in weeks:
-                week_end = week_start + timedelta(days=6)
-                if week_start.month == week_end.month:
-                    label = f"{week_start.day}-{week_end.day} {week_end.strftime('%b').upper()}"
-                else:
-                    label = (
-                        f"{week_start.day} {week_start.strftime('%b').upper()}-"
-                        f"{week_end.day} {week_end.strftime('%b').upper()}"
-                    )
+                label = format_week_label(week_start)
                 tickets = 0
                 for count in jira_map.get((process.uuid, label, "ticket_count"), {}).values():
                     tickets += count
@@ -433,6 +421,4 @@ def compute_live_coverage(
         results = results[non_week_cols + week_labels]
     results.attrs["week_columns"] = week_labels
 
-    if display_mode.lower() == "coverage":
-        results[required_col] = results[required_col]
     return results
