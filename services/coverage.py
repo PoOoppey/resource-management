@@ -151,19 +151,16 @@ def compute_theoretical_coverage(data, view: str, group_by: str, unit: str) -> p
     merged["Allocated"] = merged["Allocated"].fillna(0.0)
     merged["Required"] = merged["Required"].fillna(0.0)
 
+    merged = merged.rename(columns={"Allocated": "Coverage"})
+    merged = merged.rename(columns={"Required": "Required"})
+    merged["Gap"] = merged["Coverage"] - merged["Required"]
+
     column_order = ["Region"]
     if group_key == "office_uuid":
         column_order.append("Office")
-    column_order.extend(["Process", f"Required ({unit.lower()})", f"Allocated ({unit.lower()})"])
+    column_order.extend(["Process", "Required", "Coverage", "Gap"])
 
-    merged = merged.rename(
-        columns={
-            "Required": f"Required ({unit.lower()})",
-            "Allocated": f"Allocated ({unit.lower()})",
-        }
-    )
-
-    return merged[column_order].sort_values(by=column_order[:-2])
+    return merged[column_order].sort_values(by=column_order[:-3])
 
 
 def _week_range(start: date, end: date) -> List[date]:
@@ -216,10 +213,13 @@ def compute_live_coverage(
     for support in support_allocations:
         support_lookup[support.allocation_uuid].append(support)
 
-    base_records = coverage_df[[col for col in coverage_df.columns if "required" in col.lower()]]
-    required_col = base_records.columns[-1]
+    required_col = "Required"
 
-    results = coverage_df.copy()
+    results = coverage_df.rename(columns={"Coverage": "Theoretical"}).copy()
+    if "Gap" in results.columns:
+        results["Gap"] = results["Theoretical"] - results["Required"]
+
+    week_labels = []
 
     for week_start in weeks:
         weekly_hours = defaultdict(float)
@@ -246,7 +246,13 @@ def compute_live_coverage(
                 )
                 weekly_hours[key] += hours
 
-        column_label = week_start.strftime("%Y-W%W")
+        week_end = week_start + timedelta(days=6)
+        if week_start.month == week_end.month:
+            label = f"{week_start.day}-{week_end.day} {week_end.strftime('%b').upper()}"
+        else:
+            label = f"{week_start.day} {week_start.strftime('%b').upper()}-{week_end.day} {week_end.strftime('%b').upper()}"
+        column_label = label
+        week_labels.append(column_label)
         results[column_label] = 0.0
         for (region, office_name, process_name, group), value in weekly_hours.items():
             mask = results["Region"] == region
@@ -263,17 +269,31 @@ def compute_live_coverage(
 
             counts = get_jira_counts(process.uuid)
             for count in counts:
-                label = count.week_start.strftime("%Y-W%W")
+                week_end = count.week_start + timedelta(days=6)
+                if count.week_start.month == week_end.month:
+                    label = f"{count.week_start.day}-{week_end.day} {week_end.strftime('%b').upper()}"
+                else:
+                    label = (
+                        f"{count.week_start.day} {count.week_start.strftime('%b').upper()}-"
+                        f"{week_end.day} {week_end.strftime('%b').upper()}"
+                    )
                 jira_map[(process.uuid, label, "ticket_count")]["tickets"] = count.ticket_count
 
         for column in results.columns:
-            if column.startswith("202") and display_mode.lower() == "jira":
-                results[column] = results[column].apply(lambda _: "0")
+            if column in week_labels and display_mode.lower() == "jira":
+                results[column] = 0
 
         for process in processes:
             process_name = process.name
             for week_start in weeks:
-                label = week_start.strftime("%Y-W%W")
+                week_end = week_start + timedelta(days=6)
+                if week_start.month == week_end.month:
+                    label = f"{week_start.day}-{week_end.day} {week_end.strftime('%b').upper()}"
+                else:
+                    label = (
+                        f"{week_start.day} {week_start.strftime('%b').upper()}-"
+                        f"{week_end.day} {week_end.strftime('%b').upper()}"
+                    )
                 tickets = 0
                 for count in jira_map.get((process.uuid, label, "ticket_count"), {}).values():
                     tickets += count
@@ -282,8 +302,13 @@ def compute_live_coverage(
                 elif display_mode.lower() == "coverage+jira":
                     column_values = results.loc[results["Process"] == process_name, label]
                     results.loc[results["Process"] == process_name, label] = column_values.map(
-                        lambda v: f"{v:.0f}{'h' if unit.lower() == 'hours' else 'fte'} ({tickets})"
+                        lambda v: f"{v:.0f} ({tickets})" if pd.notna(v) else v
                     )
+
+    if week_labels:
+        non_week_cols = [col for col in results.columns if col not in week_labels]
+        results = results[non_week_cols + week_labels]
+    results.attrs["week_columns"] = week_labels
 
     if display_mode.lower() == "coverage":
         results[required_col] = results[required_col]
