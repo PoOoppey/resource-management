@@ -6,6 +6,11 @@ from enum import Enum
 from typing import Dict, List, Optional
 
 
+class ExpertiseLevelError(ValueError):
+    """Raised when an expertise level value is outside the allowed range."""
+
+
+
 class Region(str, Enum):
     EMEA = "EMEA"
     AMER = "AMER"
@@ -110,6 +115,33 @@ class Process:
             "support_status": SupportStatus(raw["support_status"]),
         }
         return cls(**raw)
+
+
+@dataclass
+class EmployeeExpertise:
+    uuid: str
+    employee_uuid: str
+    process_uuid: str
+    level: int
+    start_date: date
+    end_date: Optional[date] = None
+
+    def __post_init__(self) -> None:
+        if not 1 <= int(self.level) <= 5:
+            raise ExpertiseLevelError("Expertise level must be between 1 and 5 inclusive.")
+        self.level = int(self.level)
+
+    @classmethod
+    def from_dict(cls, raw: Dict) -> "EmployeeExpertise":
+        end_date = raw.get("end_date")
+        return cls(
+            uuid=raw["uuid"],
+            employee_uuid=raw["employee_uuid"],
+            process_uuid=raw["process_uuid"],
+            level=int(raw["level"]),
+            start_date=date.fromisoformat(raw["start_date"]),
+            end_date=date.fromisoformat(end_date) if end_date else None,
+        )
 
 
 @dataclass
