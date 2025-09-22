@@ -9,6 +9,7 @@ import streamlit as st
 
 from models import (
     Allocation,
+    App,
     Criticality,
     Employee,
     Office,
@@ -119,6 +120,7 @@ def _smart_editor(
     select_options: Optional[Dict[str, Dict[str, str]]] = None,
     number_columns: Optional[Dict[str, Dict[str, Any]]] = None,
     list_columns: Optional[Sequence[str]] = None,
+    multiselect_options: Optional[Dict[str, Dict[str, str]]] = None,
     uuid_prefix: Optional[str] = None,
     labeler: Optional[Callable[[Dict[str, Any]], str]] = None,
     extra_fixed_values: Optional[Dict[str, Any]] = None,
@@ -133,6 +135,8 @@ def _smart_editor(
 
     if list_columns:
         for column in list_columns:
+            if multiselect_options and column in multiselect_options:
+                continue
             if column in df.columns:
                 df[column] = df[column].apply(
                     lambda value: ", ".join(value) if isinstance(value, list) else (value or "")
@@ -151,7 +155,25 @@ def _smart_editor(
         if column in hidden_columns:
             continue
         label = column_labels.get(column, column.replace("_", " ").title())
-        if select_options and column in select_options:
+        if multiselect_options and column in multiselect_options:
+            options = list(multiselect_options[column].keys())
+
+            def _make_formatter(mapping: Dict[str, str]) -> Callable[[Any], str]:
+                def _format(values: Any) -> str:
+                    if not values:
+                        return "—"
+                    if isinstance(values, str):
+                        values = [values]
+                    return ", ".join(mapping.get(value, "—") for value in values)
+
+                return _format
+
+            column_config[column] = st.column_config.MultiSelectColumn(
+                label,
+                options=options,
+                format_func=_make_formatter(multiselect_options[column]),
+            )
+        elif select_options and column in select_options:
             options = list(select_options[column].keys())
 
             def _make_formatter(mapping: Dict[str, str]) -> Callable[[Any], str]:
@@ -187,6 +209,8 @@ def _smart_editor(
 
     if list_columns:
         for column in list_columns:
+            if multiselect_options and column in multiselect_options:
+                continue
             if column in edited_df.columns:
                 edited_df[column] = (
                     edited_df[column]
@@ -201,6 +225,9 @@ def _smart_editor(
     for raw in edited_df.to_dict(orient="records"):
         record = {key: value for key, value in raw.items() if key not in hidden_columns}
         for column, value in list(record.items()):
+            if isinstance(value, list):
+                record[column] = value
+                continue
             if pd.isna(value):
                 record[column] = None
         if has_uuid:
@@ -265,6 +292,21 @@ def render_offices(offices: List[Office]):
     )
 
 
+def render_apps(apps: List[App]):
+    st.subheader("Apps")
+    criticality_options = {item.value: item.value.title() for item in Criticality}
+    _smart_editor(
+        items=apps,
+        model_cls=App,
+        dataset_key="apps",
+        save_label="Save apps",
+        column_labels={"name": "Name", "criticality": "Criticality"},
+        select_options={"criticality": criticality_options},
+        uuid_prefix="app",
+        labeler=lambda record: record.get("name", ""),
+    )
+
+
 def render_roles(roles: List[Role]):
     st.subheader("Roles")
     role_type_options = {role_type.value: role_type.value.title().replace("_", " ") for role_type in RoleType}
@@ -280,10 +322,12 @@ def render_roles(roles: List[Role]):
     )
 
 
-def render_processes(processes: List[Process]):
+def render_processes(processes: List[Process], apps: List[App]):
     st.subheader("Processes")
     criticality_options = {item.value: item.value.title() for item in Criticality}
     support_status_options = {item.value: item.value.title().replace("_", " ") for item in SupportStatus}
+    app_options = {app.uuid: app.name for app in apps}
+    process_options = {process.uuid: process.name for process in processes}
     _smart_editor(
         items=processes,
         model_cls=Process,
@@ -302,6 +346,10 @@ def render_processes(processes: List[Process]):
             "support_status": support_status_options,
         },
         list_columns=["apps_related", "process_related"],
+        multiselect_options={
+            "apps_related": app_options,
+            "process_related": process_options,
+        },
         uuid_prefix="process",
         labeler=lambda record: record.get("name", ""),
     )
@@ -393,6 +441,7 @@ def render_allocations(
         overview_df.index.name = "employee_uuid"
 
     st.caption("Select an employee below to manage role and support allocations.")
+    disabled_columns = list(overview_df.columns)
     st.data_editor(
         overview_df,
         hide_index=True,
@@ -401,15 +450,16 @@ def render_allocations(
         column_config={
             "Employee": st.column_config.TextColumn("Employee"),
             "Utilization": st.column_config.ProgressColumn(
-                "Utilization", format="%.0f%%", min_value=0.0, max_value=1.0
+                "Utilization", format="{:.0%}", min_value=0.0, max_value=1.0
             ),
             "Role Split": st.column_config.TextColumn("Roles"),
             "Support Details": st.column_config.TextColumn("Support work"),
         },
-        disabled=True,
+        disabled=disabled_columns,
         key="allocation_overview",
     )
 
+    stored_employee_uuid: Optional[str] = st.session_state.get("selected_employee_uuid")
     selected_employee_uuid: Optional[str] = None
     if overview_df is not None and not overview_df.empty:
         selection = st.session_state.get("allocation_overview", {})
@@ -418,6 +468,13 @@ def render_allocations(
             row_position = selected_rows[0]
             if 0 <= row_position < len(overview_df.index):
                 selected_employee_uuid = overview_df.index[row_position]
+                st.session_state["selected_employee_uuid"] = selected_employee_uuid
+        elif stored_employee_uuid and stored_employee_uuid in overview_df.index:
+            selected_employee_uuid = stored_employee_uuid
+        elif stored_employee_uuid and stored_employee_uuid not in overview_df.index:
+            st.session_state.pop("selected_employee_uuid", None)
+    elif stored_employee_uuid:
+        st.session_state.pop("selected_employee_uuid", None)
 
     st.divider()
 
@@ -561,6 +618,7 @@ def main():
             "Employees",
             "Offices",
             "Roles",
+            "Apps",
             "Processes",
             "Required Coverage",
             "Allocations",
@@ -575,10 +633,12 @@ def main():
     with tabs[2]:
         render_roles(data["roles"])
     with tabs[3]:
-        render_processes(data["processes"])
+        render_apps(data["apps"])
     with tabs[4]:
-        render_required_coverage(data["coverage"], data["processes"], data["offices"])
+        render_processes(data["processes"], data["apps"])
     with tabs[5]:
+        render_required_coverage(data["coverage"], data["processes"], data["offices"])
+    with tabs[6]:
         render_allocations(
             data["employees"],
             data["roles"],
@@ -586,7 +646,7 @@ def main():
             data["allocations"],
             data["support_allocations"],
         )
-    with tabs[6]:
+    with tabs[7]:
         render_scenarios(data["scenarios"])
 
 
