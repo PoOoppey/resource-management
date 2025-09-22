@@ -6,7 +6,18 @@ from typing import Any, List
 import pandas as pd
 import streamlit as st
 
-from models import Allocation, Employee, Process, RequiredCoverage, Role, Scenario, SupportAllocation
+from models import (
+    Allocation,
+    App,
+    Criticality,
+    Employee,
+    Process,
+    RequiredCoverage,
+    Role,
+    Scenario,
+    SupportAllocation,
+    SupportStatus,
+)
 from services.data_loader import get_data, update_data
 from utils.notifications import notify
 
@@ -62,10 +73,39 @@ def render_roles(roles: List[Role]):
         notify("Roles updated", "success")
 
 
-def render_processes(processes: List[Process]):
+def render_apps(apps: List[App]):
+    st.subheader("Apps")
+    df = _editable_dataframe(apps)
+    edited = st.data_editor(df, num_rows="dynamic", hide_index=True)
+    if st.button("Save Apps"):
+        update_data("apps", [App.from_dict(row.to_dict()) for _, row in edited.iterrows()])
+        notify("Apps updated", "success")
+
+
+def render_processes(processes: List[Process], apps: List[App]):
     st.subheader("Processes")
     df = _editable_dataframe(processes)
-    edited = st.data_editor(df, num_rows="dynamic")
+    app_options = [app.uuid for app in apps]
+    process_options = [proc.uuid for proc in processes]
+    edited = st.data_editor(
+        df,
+        num_rows="dynamic",
+        hide_index=True,
+        column_config={
+            "criticality": st.column_config.SelectboxColumn(
+                "Criticality", options=[option.value for option in Criticality]
+            ),
+            "support_status": st.column_config.SelectboxColumn(
+                "Support Status", options=[option.value for option in SupportStatus]
+            ),
+            "apps_related": st.column_config.MultiSelectColumn(
+                "Apps Related", options=app_options
+            ),
+            "process_related": st.column_config.MultiSelectColumn(
+                "Process Related", options=process_options
+            ),
+        },
+    )
     if st.button("Save Processes"):
         update_data("processes", [Process.from_dict(row.to_dict()) for _, row in edited.iterrows()])
         notify("Processes updated", "success")
@@ -123,6 +163,7 @@ def main():
             "Offices",
             "Roles",
             "Processes",
+            "Apps",
             "Required Coverage",
             "Allocations",
             "Scenarios",
@@ -136,12 +177,14 @@ def main():
     with tabs[2]:
         render_roles(data["roles"])
     with tabs[3]:
-        render_processes(data["processes"])
+        render_processes(data["processes"], data["apps"])
     with tabs[4]:
-        render_required_coverage(data["coverage"])
+        render_apps(data["apps"])
     with tabs[5]:
-        render_allocations(data["allocations"], data["support_allocations"])
+        render_required_coverage(data["coverage"])
     with tabs[6]:
+        render_allocations(data["allocations"], data["support_allocations"])
+    with tabs[7]:
         render_scenarios(data["scenarios"])
 
 
