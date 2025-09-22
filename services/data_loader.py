@@ -9,6 +9,7 @@ from models import (
     Allocation,
     App,
     AttendanceRecord,
+    EmployeeExpertise,
     Employee,
     JiraCount,
     Office,
@@ -30,6 +31,7 @@ DATA_FILES: Tuple[Tuple[str, str], ...] = (
     ("attendances", "attendances.json"),
     ("apps", "apps.json"),
     ("scenarios", "scenarios.json"),
+    ("expertise_levels", "expertise_levels.json"),
 )
 
 
@@ -44,6 +46,7 @@ MODEL_MAP = {
     "attendances": AttendanceRecord,
     "apps": App,
     "scenarios": Scenario,
+    "expertise_levels": EmployeeExpertise,
 }
 
 
