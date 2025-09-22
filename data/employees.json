@@ -1,0 +1,18 @@
+[
+  {
+    "uuid": "emp-1",
+    "first_name": "Alice",
+    "last_name": "Anderson",
+    "trigram": "ALA",
+    "office_uuid": "office-lon",
+    "working_hours": 40
+  },
+  {
+    "uuid": "emp-2",
+    "first_name": "Bob",
+    "last_name": "Brown",
+    "trigram": "BOB",
+    "office_uuid": "office-nyc",
+    "working_hours": 40
+  }
+]

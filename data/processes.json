@@ -1,0 +1,20 @@
+[
+  {
+    "uuid": "process-email",
+    "name": "Email Support",
+    "criticality": "HIGH",
+    "description": "Handle email tickets",
+    "apps_related": ["app-mail"],
+    "process_related": [],
+    "support_status": "SUPPORTER"
+  },
+  {
+    "uuid": "process-phone",
+    "name": "Phone Support",
+    "criticality": "MEDIUM",
+    "description": "Handle phone calls",
+    "apps_related": ["app-voice"],
+    "process_related": ["process-email"],
+    "support_status": "PARTIALLY_SUPPORTED"
+  }
+]

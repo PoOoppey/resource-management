@@ -1,0 +1,20 @@
+[
+  {
+    "uuid": "scn-1",
+    "name": "Add Contractor",
+    "adjustments": [
+      {
+        "uuid": "adj-1",
+        "type": "ADD_EMPLOYEE",
+        "payload": {
+          "uuid": "emp-3",
+          "first_name": "Cara",
+          "last_name": "Cooper",
+          "trigram": "CAC",
+          "office_uuid": "office-lon",
+          "working_hours": 20
+        }
+      }
+    ]
+  }
+]

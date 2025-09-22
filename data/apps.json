@@ -1,0 +1,12 @@
+[
+  {
+    "uuid": "app-mail",
+    "name": "MailDesk",
+    "criticality": "HIGH"
+  },
+  {
+    "uuid": "app-voice",
+    "name": "VoiceHub",
+    "criticality": "MEDIUM"
+  }
+]

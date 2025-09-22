@@ -1,0 +1,12 @@
+[
+  {
+    "uuid": "office-lon",
+    "name": "London",
+    "region": "EMEA"
+  },
+  {
+    "uuid": "office-nyc",
+    "name": "New York",
+    "region": "AMER"
+  }
+]
