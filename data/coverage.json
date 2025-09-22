@@ -1,0 +1,20 @@
+[
+  {
+    "uuid": "cov-email-lon",
+    "process_uuid": "process-email",
+    "office_uuid": "office-lon",
+    "required_hours": 40
+  },
+  {
+    "uuid": "cov-phone-lon",
+    "process_uuid": "process-phone",
+    "office_uuid": "office-lon",
+    "required_hours": 20
+  },
+  {
+    "uuid": "cov-email-nyc",
+    "process_uuid": "process-email",
+    "office_uuid": "office-nyc",
+    "required_hours": 30
+  }
+]

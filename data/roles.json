@@ -1,0 +1,12 @@
+[
+  {
+    "uuid": "role-support",
+    "name": "Support Engineer",
+    "type": "SUPPORT"
+  },
+  {
+    "uuid": "role-manager",
+    "name": "Manager",
+    "type": "MANAGEMENT"
+  }
+]

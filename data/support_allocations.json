@@ -1,0 +1,23 @@
+[
+  {
+    "uuid": "supp-1",
+    "allocation_uuid": "alloc-1",
+    "process_uuid": "process-email",
+    "percentage": 0.6,
+    "weight": 1.0
+  },
+  {
+    "uuid": "supp-2",
+    "allocation_uuid": "alloc-1",
+    "process_uuid": "process-phone",
+    "percentage": 0.4,
+    "weight": 1.0
+  },
+  {
+    "uuid": "supp-3",
+    "allocation_uuid": "alloc-3",
+    "process_uuid": "process-email",
+    "percentage": 1.0,
+    "weight": 1.0
+  }
+]

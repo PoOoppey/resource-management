@@ -1,0 +1,12 @@
+[
+  {
+    "process_uuid": "process-email",
+    "week_start": "2025-09-29",
+    "ticket_count": 12
+  },
+  {
+    "process_uuid": "process-phone",
+    "week_start": "2025-09-29",
+    "ticket_count": 4
+  }
+]
