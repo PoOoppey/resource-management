@@ -174,6 +174,129 @@ def _week_range(start: date, end: date) -> List[date]:
     return weeks
 
 
+def weeks_in_range(date_range: Tuple[date, date]) -> List[date]:
+    """Return a list of ISO week starts within ``date_range``.
+
+    The public wrapper allows UI components to display the same weekly buckets
+    used by the live coverage computation without exposing the internal helper
+    directly.
+    """
+
+    return _week_range(*date_range)
+
+
+def compute_attendance_impact_details(
+    data,
+    attendance: List[AttendanceRecord],
+    week_start: date,
+    group_by: str,
+    unit: str,
+) -> pd.DataFrame:
+    """Build a detailed view of attendance impact for a specific week."""
+
+    week_end = week_start + timedelta(days=6)
+
+    impacted_records = [
+        record
+        for record in attendance
+        if record.start_date <= week_end and record.end_date >= week_start
+    ]
+
+    if not impacted_records:
+        return pd.DataFrame(
+            columns=[
+                "Region",
+                "Office",
+                "Employee",
+                "Process",
+                "Reason",
+                f"Adjusted Contribution ({unit.lower()})",
+                f"Base Contribution ({unit.lower()})",
+            ]
+        )
+
+    employees: List[Employee] = data.get("employees", [])
+    allocations: List[Allocation] = data.get("allocations", [])
+    support_allocations: List[SupportAllocation] = data.get("support_allocations", [])
+    offices: List[Office] = data.get("offices", [])
+    processes: List[Process] = data.get("processes", [])
+
+    employee_lookup = _build_lookup(employees, "uuid")
+    office_lookup = _build_lookup(offices, "uuid")
+    process_lookup = _build_lookup(processes, "uuid")
+
+    allocation_lookup: Dict[str, List[Allocation]] = defaultdict(list)
+    for allocation in allocations:
+        allocation_lookup[allocation.employee_uuid].append(allocation)
+
+    support_lookup: Dict[str, List[SupportAllocation]] = defaultdict(list)
+    for support in support_allocations:
+        support_lookup[support.allocation_uuid].append(support)
+
+    detail_rows: List[Dict[str, object]] = []
+
+    for record in impacted_records:
+        employee = employee_lookup.get(record.employee_uuid)
+        if not employee:
+            continue
+
+        office = office_lookup.get(employee.office_uuid)
+        if not office:
+            continue
+
+        factor = _attendance_factor(attendance, employee.uuid, week_start)
+        allocations_for_employee = allocation_lookup.get(employee.uuid, [])
+
+        for allocation in allocations_for_employee:
+            supports = support_lookup.get(allocation.uuid, [])
+            if not supports:
+                continue
+
+            for support in supports:
+                process = process_lookup.get(support.process_uuid)
+                if not process:
+                    continue
+
+                base_contribution = _convert_unit(
+                    _allocation_hours(employee, allocation, support),
+                    unit,
+                )
+                adjusted_contribution = base_contribution * factor
+
+                detail_rows.append(
+                    {
+                        "Region": office.region.value,
+                        "Office": office.name,
+                        "Employee": f"{employee.first_name} {employee.last_name}",
+                        "Process": process.name,
+                        "Reason": record.type.value.title(),
+                        f"Adjusted Contribution ({unit.lower()})": adjusted_contribution,
+                        f"Base Contribution ({unit.lower()})": base_contribution,
+                    }
+                )
+
+    if not detail_rows:
+        return pd.DataFrame(
+            columns=[
+                "Region",
+                "Office",
+                "Employee",
+                "Process",
+                "Reason",
+                f"Adjusted Contribution ({unit.lower()})",
+                f"Base Contribution ({unit.lower()})",
+            ]
+        )
+
+    df = pd.DataFrame(detail_rows)
+
+    if group_by.lower() != "office" and "Office" in df.columns:
+        df = df.drop(columns=["Office"])
+
+    sort_columns = [col for col in ["Region", "Office", "Employee", "Process"] if col in df.columns]
+    return df.sort_values(sort_columns).reset_index(drop=True)
+
+
 def _attendance_factor(attendances: List[AttendanceRecord], employee_uuid: str, week_start: date) -> float:
     week_end = week_start + timedelta(days=6)
     for record in attendances:

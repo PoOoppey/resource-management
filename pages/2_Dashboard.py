@@ -6,7 +6,12 @@ import pandas as pd
 from pandas.io.formats.style import Styler
 import streamlit as st
 
-from services.coverage import compute_live_coverage, compute_theoretical_coverage
+from services.coverage import (
+    compute_attendance_impact_details,
+    compute_live_coverage,
+    compute_theoretical_coverage,
+    weeks_in_range,
+)
 from services.data_loader import get_data
 
 
@@ -126,12 +131,14 @@ def main():
             display_mode = st.selectbox("Display mode", list(DISPLAY_MODES.keys()))
             date_range = (start, end)
 
+    unit_value = UNIT_OPTIONS[unit]
+
     if VIEW_OPTIONS[view] == "theoretical":
         df = compute_theoretical_coverage(
             data,
             view=DISPLAY_OPTIONS[display],
             group_by=GROUP_OPTIONS[group_by],
-            unit=UNIT_OPTIONS[unit],
+            unit=unit_value,
         )
     else:
         df = compute_live_coverage(
@@ -140,7 +147,7 @@ def main():
             date_range=date_range,
             display_mode=DISPLAY_MODES.get(display_mode, "coverage"),
             group_by=GROUP_OPTIONS[group_by],
-            unit=UNIT_OPTIONS[unit],
+            unit=unit_value,
         )
 
     if search_term:
@@ -151,6 +158,30 @@ def main():
 
     styled = _style_dataframe(df, VIEW_OPTIONS[view], DISPLAY_MODES.get(display_mode, "coverage"))
     st.dataframe(styled, use_container_width=True, hide_index=True)
+
+    if VIEW_OPTIONS[view] == "live":
+        weeks = weeks_in_range(date_range)
+        attendance_details = pd.DataFrame()
+        if weeks:
+            selected_week = st.selectbox(
+                "Week",
+                weeks,
+                format_func=lambda d: d.strftime("%Y-W%W"),
+                help="Select a week to review attendance impact details.",
+            )
+            attendance_details = compute_attendance_impact_details(
+                data,
+                attendance=data.get("attendances", []),
+                week_start=selected_week,
+                group_by=GROUP_OPTIONS[group_by],
+                unit=unit_value,
+            )
+
+        st.subheader("Attendance impact details")
+        if attendance_details.empty:
+            st.info("No attendance impact recorded for the selected parameters.")
+        else:
+            st.dataframe(attendance_details, use_container_width=True)
 
 
 if __name__ == "__main__":
