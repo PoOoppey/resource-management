@@ -46,11 +46,15 @@ def _style_dataframe(
 
     styler = df.style
 
+    required_series = df["Required"] if "Required" in df.columns else None
+
     numeric_columns = [
         column
         for column in df.columns
         if pd.api.types.is_numeric_dtype(df[column]) and column not in {"Region", "Office", "Process", "Role"}
     ]
+
+    style_operations: list[tuple[str, dict]] = []
 
     if numeric_columns:
         decimals = 0
@@ -62,25 +66,30 @@ def _style_dataframe(
             column: (lambda value, d=decimals: "" if pd.isna(value) else f"{value:,.{d}f}")
             for column in numeric_columns
         }
-        styler = styler.format(formatter)
+        style_operations.append(("format", {"formatter": formatter}))
 
     if view == "live":
         reference_columns = [col for col in ["Required", "Theoretical"] if col in df.columns]
         if reference_columns:
-            styler = styler.set_properties(subset=reference_columns, **STATIC_COLUMN_STYLE)
+            style_operations.append(
+                (
+                    "set_properties",
+                    {"subset": reference_columns, **STATIC_COLUMN_STYLE},
+                )
+            )
 
     if view == "theoretical":
         coverage_columns = [col for col in ["Coverage"] if col in df.columns]
 
         def _style_coverage(row: pd.Series) -> pd.Series:
-            required = row.get("Required")
-            styles = {}
-            for column in coverage_columns:
-                styles[column] = coverage_style(required, row.get(column))
+            required = required_series.get(row.name) if required_series is not None else None
+            styles = {column: coverage_style(required, row.get(column)) for column in coverage_columns}
             return pd.Series(styles)
 
-        if coverage_columns:
-            styler = styler.apply(_style_coverage, axis=1, subset=coverage_columns)
+        if coverage_columns and required_series is not None:
+            style_operations.append(
+                ("apply", {"func": _style_coverage, "axis": 1, "subset": coverage_columns})
+            )
 
     if view == "live" and display_mode.lower() not in {"jira"}:
         week_columns = df.attrs.get("week_columns") or [
@@ -91,14 +100,14 @@ def _style_dataframe(
         ]
 
         def _style_weeks(row: pd.Series) -> pd.Series:
-            required = row.get("Required")
-            styles = {
-                column: coverage_style(required, row.get(column)) for column in week_columns
-            }
+            required = required_series.get(row.name) if required_series is not None else None
+            styles = {column: coverage_style(required, row.get(column)) for column in week_columns}
             return pd.Series(styles)
 
-        if week_columns:
-            styler = styler.apply(_style_weeks, axis=1, subset=week_columns)
+        if week_columns and required_series is not None:
+            style_operations.append(
+                ("apply", {"func": _style_weeks, "axis": 1, "subset": week_columns})
+            )
 
     zero_sensitive_columns = [
         column
@@ -106,10 +115,8 @@ def _style_dataframe(
         if column not in {"Region", "Office", "Process", "Role"}
     ]
 
-    has_required_column = "Required" in df.columns
-
     def _style_neutral_zero(row: pd.Series) -> pd.Series:
-        required_value = coerce_numeric(row.get("Required"))
+        required_value = coerce_numeric(required_series.get(row.name)) if required_series is not None else None
         styles = {column: "" for column in zero_sensitive_columns}
         for column in zero_sensitive_columns:
             value = coerce_numeric(row.get(column))
@@ -117,8 +124,13 @@ def _style_dataframe(
                 styles[column] = "color: #6b7280; font-style: italic"
         return pd.Series(styles)
 
-    if zero_sensitive_columns and has_required_column:
-        styler = styler.apply(_style_neutral_zero, axis=1, subset=zero_sensitive_columns)
+    if zero_sensitive_columns and required_series is not None:
+        style_operations.append(
+            ("apply", {"func": _style_neutral_zero, "axis": 1, "subset": zero_sensitive_columns})
+        )
+
+    for method, kwargs in style_operations:
+        styler = getattr(styler, method)(**kwargs)
 
     return styler
 
