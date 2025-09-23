@@ -11,7 +11,11 @@
           "first_name": "Cara",
           "last_name": "Cooper",
           "trigram": "CAC",
-          "office_uuid": "office-lon",
+          "office": {
+            "uuid": "office-lon",
+            "name": "London",
+            "region": "EMEA"
+          },
           "working_hours": 20
         }
       }

@@ -8,13 +8,14 @@ import pandas as pd
 
 from models import AdjustmentType, Scenario
 from services.data_loader import MODEL_MAP
+from utils.relations import flatten_payload
 
 
 def apply_scenario(baseline_data: Dict[str, Iterable], scenario: Scenario) -> Dict[str, Iterable]:
     updated = {key: copy.deepcopy(value) for key, value in baseline_data.items()}
 
     for adjustment in scenario.adjustments:
-        payload = adjustment.payload
+        payload = flatten_payload(_collection_key(adjustment.type), adjustment.payload)
         collection = updated.get(_collection_key(adjustment.type))
         if collection is None:
             continue
