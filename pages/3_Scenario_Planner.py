@@ -30,6 +30,8 @@ UUID_PREFIX = {
     "coverage": "cov",
 }
 
+DIFF_COLUMN_LABEL = "Diff vs baseline"
+
 NUMERIC_FIELDS = {
     "employees": ["working_hours"],
     "allocations": ["percentage", "weight"],
@@ -285,27 +287,84 @@ def _build_adjustments(data: Dict) -> Tuple[List[ScenarioAdjustment], List[str]]
     return adjustments, issues
 
 
+def _diff_dataframe(
+    dataset: str, baseline_df: pd.DataFrame, scenario_df: pd.DataFrame
+) -> pd.DataFrame:
+    baseline_records = _records_from_dataframe(dataset, baseline_df)
+    scenario_records = _records_from_dataframe(dataset, scenario_df)
+
+    baseline_map = {record["uuid"]: record for record in baseline_records if record.get("uuid")}
+    scenario_map = {record["uuid"]: record for record in scenario_records if record.get("uuid")}
+
+    columns = list(scenario_df.columns)
+    for column in baseline_df.columns:
+        if column not in columns:
+            columns.append(column)
+
+    rows: List[Dict] = []
+    status_order = {"Added": 0, "Updated": 1, "Removed": 2, "Unchanged": 3}
+
+    for record in scenario_records:
+        uuid = record.get("uuid")
+        row = {column: record.get(column) for column in columns}
+        if uuid and uuid in baseline_map:
+            baseline_record = baseline_map[uuid]
+            status = "Updated" if not _records_equal(baseline_record, record) else "Unchanged"
+        else:
+            status = "Added"
+        row[DIFF_COLUMN_LABEL] = status
+        row["_diff_order"] = status_order.get(status, 99)
+        rows.append(row)
+
+    for uuid, record in baseline_map.items():
+        if uuid not in scenario_map:
+            row = {column: record.get(column) for column in columns}
+            row[DIFF_COLUMN_LABEL] = "Removed"
+            row["_diff_order"] = status_order.get("Removed", 99)
+            rows.append(row)
+
+    if not rows:
+        return pd.DataFrame(columns=[*columns, DIFF_COLUMN_LABEL])
+
+    diff_df = pd.DataFrame(rows)
+    diff_df = diff_df.sort_values(by=["_diff_order", "uuid"], kind="stable")
+    if "_diff_order" in diff_df.columns:
+        diff_df = diff_df.drop(columns=["_diff_order"])
+
+    ordered_columns = [column for column in columns if column in diff_df.columns]
+    if DIFF_COLUMN_LABEL in diff_df.columns:
+        ordered_columns.append(DIFF_COLUMN_LABEL)
+
+    return diff_df[ordered_columns]
+
+
 def _render_dataset_editor(dataset: str, baseline_df: pd.DataFrame) -> None:
     state = st.session_state[_scenario_state_key()]
     scenario_df = state["datasets"].get(dataset, pd.DataFrame()).copy()
     scenario_df = _ensure_uuid_column(dataset, scenario_df)
+    st.markdown("#### Scenario entries")
+    edited_df = st.data_editor(
+        scenario_df,
+        num_rows="dynamic",
+        use_container_width=True,
+        key=f"editor_{dataset}",
+        column_config={
+            "uuid": st.column_config.TextColumn("UUID", disabled=True),
+        },
+    )
+    updated_df = _ensure_uuid_column(dataset, edited_df.copy())
+    state["datasets"][dataset] = updated_df
 
-    baseline_col, scenario_col = st.columns(2)
-    with baseline_col:
-        st.caption("Baseline")
-        st.dataframe(baseline_df, use_container_width=True)
-    with scenario_col:
-        st.caption("Scenario")
-        edited_df = st.data_editor(
-            scenario_df,
-            num_rows="dynamic",
-            use_container_width=True,
-            key=f"editor_{dataset}",
-            column_config={
-                "uuid": st.column_config.TextColumn("UUID", disabled=True),
-            },
-        )
-        state["datasets"][dataset] = _ensure_uuid_column(dataset, edited_df.copy())
+    st.markdown("#### Scenario vs baseline")
+    diff_df = _diff_dataframe(dataset, baseline_df, updated_df)
+    st.dataframe(
+        diff_df,
+        use_container_width=True,
+        column_config={
+            "uuid": st.column_config.TextColumn("UUID", disabled=True),
+            DIFF_COLUMN_LABEL: st.column_config.TextColumn(DIFF_COLUMN_LABEL, disabled=True),
+        },
+    )
 
 
 def main():
@@ -339,11 +398,19 @@ def main():
     st.dataframe(baseline_coverage, use_container_width=True)
 
     st.subheader("Scenario data entry")
-    for dataset in DATASET_ORDER:
-        st.markdown(f"### {dataset.replace('_', ' ').title()}")
-        baseline_df = _items_to_dataframe(data.get(dataset, [])).copy()
-        baseline_df = _ensure_uuid_column(dataset, baseline_df)
-        _render_dataset_editor(dataset, baseline_df)
+    tab_labels = [dataset.replace("_", " ").title() for dataset in DATASET_ORDER]
+    tabs = st.tabs(tab_labels)
+    for dataset, tab in zip(DATASET_ORDER, tabs):
+        with tab:
+            baseline_df = _items_to_dataframe(data.get(dataset, [])).copy()
+            baseline_df = _ensure_uuid_column(dataset, baseline_df)
+            st.caption("Baseline data")
+            st.dataframe(
+                baseline_df,
+                use_container_width=True,
+                column_config={"uuid": st.column_config.TextColumn("UUID", disabled=True)},
+            )
+            _render_dataset_editor(dataset, baseline_df)
 
     adjustments, issues = _build_adjustments(data)
     state["adjustments"] = adjustments
