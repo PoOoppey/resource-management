@@ -21,7 +21,7 @@ GROUP_OPTIONS = {"Office": "office", "Region": "region"}
 UNIT_OPTIONS = {"Hours": "hours", "FTE": "fte"}
 DATA_DISPLAY = {
     "theoretical": {"Role": "role", "Process": "process"},
-    "live": {"Coverage": "coverage", "Coverage + JIRA": "coverage+jira", "JIRA": "jira"},
+    "live": {"Coverage": "coverage", "JIRA": "jira"},
 }
 
 STATIC_COLUMN_STYLE = {"background-color": "#f3f0ff", "font-style": "italic"}
@@ -183,16 +183,36 @@ def main():
         data_options = DATA_DISPLAY[view]
 
         secondary_row = st.columns([1.6, 1.2, 1.4])
+        selected_display_labels: list[str] = []
         with secondary_row[0]:
-            pill_selection = st.pills(
-                "Display",
-                list(data_options.keys()),
-                selection_mode="single",
-                default=list(data_options.keys())[0],
-            )
-            if isinstance(pill_selection, (list, tuple, set)):
-                pill_selection = next(iter(pill_selection), list(data_options.keys())[0])
-            data_display_label = pill_selection
+            display_labels = list(data_options.keys())
+            if view == "live":
+                pill_selection = st.pills(
+                    "Display",
+                    display_labels,
+                    selection_mode="multi",
+                    default=[display_labels[0]] if display_labels else None,
+                )
+                if pill_selection is None:
+                    pill_selection = []
+                if isinstance(pill_selection, str):
+                    pill_selection = [pill_selection]
+                elif not isinstance(pill_selection, (list, tuple, set)):
+                    pill_selection = [pill_selection]
+                selected_display_labels = list(pill_selection)
+                if not selected_display_labels and display_labels:
+                    selected_display_labels = [display_labels[0]]
+            else:
+                pill_selection = st.pills(
+                    "Display",
+                    display_labels,
+                    selection_mode="single",
+                    default=display_labels[0] if display_labels else None,
+                )
+                if isinstance(pill_selection, (list, tuple, set)):
+                    pill_selection = next(iter(pill_selection), display_labels[0] if display_labels else None)
+                selected_display_labels = [pill_selection] if pill_selection else []
+            data_display_label = selected_display_labels[0] if selected_display_labels else None
         with secondary_row[1]:
             st.caption("Search")
             search_term = st.text_input(
@@ -216,7 +236,26 @@ def main():
 
     group_by = GROUP_OPTIONS[group_by_label]
     unit_value = UNIT_OPTIONS[unit_label]
-    display_value = DATA_DISPLAY[view][data_display_label]
+    if view == "live":
+        selected_values = {
+            DATA_DISPLAY[view][label]
+            for label in selected_display_labels
+            if label in DATA_DISPLAY[view]
+        }
+        if not selected_values:
+            default_value = next(iter(DATA_DISPLAY[view].values()), "coverage")
+            default_label = next(iter(DATA_DISPLAY[view].keys()), "Coverage")
+            selected_values = {default_value}
+            selected_display_labels = [default_label]
+
+        if {"coverage", "jira"}.issubset(selected_values):
+            display_value = "coverage+jira"
+        else:
+            display_value = next(iter(selected_values))
+    else:
+        fallback_label = next(iter(DATA_DISPLAY[view].keys()), None)
+        effective_label = data_display_label or fallback_label
+        display_value = DATA_DISPLAY[view].get(effective_label, "process")
 
     if view == "theoretical":
         df = compute_theoretical_coverage(
