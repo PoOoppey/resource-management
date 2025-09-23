@@ -47,14 +47,26 @@ def _coerce_numeric(value):
 
 def _colorize_cell(required: float | None, value) -> str:
     value = _coerce_numeric(value)
+    required = _coerce_numeric(required)
     if pd.isna(required) or pd.isna(value):
         return ""
-    gap = value - required
-    if gap < 0:
-        return "background-color: #ffd6d6"
-    if gap < 0.1 * required:
-        return "background-color: #fff4cc"
-    return "background-color: #d6f5d6"
+
+    if required == 0:
+        if value == 0:
+            return ""
+        # highlight positive coverage when nothing was required
+        return "background-color: #bae6fd"
+
+    gap_ratio = (value - required) / required
+    if gap_ratio <= -0.15:
+        return "background-color: #fca5a5"
+    if gap_ratio < 0:
+        return "background-color: #fecaca"
+    if gap_ratio < 0.1:
+        return "background-color: #fef08a"
+    if gap_ratio < 0.25:
+        return "background-color: #bbf7d0"
+    return "background-color: #86efac"
 
 
 def _style_dataframe(
@@ -147,7 +159,10 @@ def main():
     st.title("Dashboard")
     data = get_data()
 
-    with st.expander("Filters", expanded=True):
+    filter_container = st.container()
+    with filter_container:
+        st.markdown("### Filters")
+        st.divider()
         primary_row = st.columns([1.2, 1.6, 1.0])
         with primary_row[0]:
             view_label = st.selectbox("View", list(VIEW_OPTIONS.keys()))
@@ -166,8 +181,9 @@ def main():
 
         view = VIEW_OPTIONS[view_label]
         data_options = DATA_DISPLAY[view]
-        pills_row = st.columns([1.6, 1.2, 1.4])
-        with pills_row[0]:
+
+        secondary_row = st.columns([1.6, 1.2, 1.4])
+        with secondary_row[0]:
             pill_selection = st.pills(
                 "Display",
                 list(data_options.keys()),
@@ -177,15 +193,16 @@ def main():
             if isinstance(pill_selection, (list, tuple, set)):
                 pill_selection = next(iter(pill_selection), list(data_options.keys())[0])
             data_display_label = pill_selection
-        with pills_row[1]:
+        with secondary_row[1]:
             st.caption("Search")
             search_term = st.text_input(
                 "Search",
                 placeholder="Filter rows by any column value",
                 label_visibility="collapsed",
             )
+
         date_range = _default_date_range()
-        with pills_row[2]:
+        with secondary_row[2]:
             if view == "live":
                 start, end = st.date_input(
                     "Date range",
