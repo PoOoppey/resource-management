@@ -11,6 +11,7 @@ from models import AdjustmentType, Scenario, ScenarioAdjustment
 from services.coverage import compute_theoretical_coverage
 from services.data_loader import get_data, update_data
 from services.scenario import apply_scenario
+from utils.styling import coverage_style
 
 
 DIFF_COLUMN_LABEL = "Diff vs baseline"
@@ -231,39 +232,6 @@ def _scenario_select(scenarios: List[Scenario]) -> Scenario | None:
     return options[choice]
 
 
-def _coerce_numeric(value):
-    if isinstance(value, str):
-        try:
-            numeric = value.strip().split(" ")[0].replace(",", "")
-            return float(numeric)
-        except (ValueError, IndexError):
-            return None
-    return value
-
-
-def _colorize_cell(required: float | None, value) -> str:
-    value = _coerce_numeric(value)
-    required = _coerce_numeric(required)
-    if pd.isna(required) or pd.isna(value):
-        return ""
-
-    if required == 0:
-        if value == 0:
-            return ""
-        return "background-color: #bae6fd"
-
-    gap_ratio = (value - required) / required
-    if gap_ratio <= -0.15:
-        return "background-color: #fca5a5"
-    if gap_ratio < 0:
-        return "background-color: #fecaca"
-    if gap_ratio < 0.1:
-        return "background-color: #fef08a"
-    if gap_ratio < 0.25:
-        return "background-color: #bbf7d0"
-    return "background-color: #86efac"
-
-
 def _format_coverage_value(value: float | None) -> str:
     if value is None or pd.isna(value):
         return "—"
@@ -324,9 +292,13 @@ def _style_coverage_result(df: pd.DataFrame) -> pd.io.formats.style.Styler | pd.
         scenario_coverage = row.get("Coverage (Scenario)")
 
         if "Coverage (Baseline)" in df.columns:
-            styles["Coverage (Baseline)"] = _colorize_cell(baseline_required, baseline_coverage)
+            styles["Coverage (Baseline)"] = coverage_style(
+                baseline_required, baseline_coverage
+            )
         if "Coverage (Scenario)" in df.columns:
-            styles["Coverage (Scenario)"] = _colorize_cell(scenario_required, scenario_coverage)
+            styles["Coverage (Scenario)"] = coverage_style(
+                scenario_required, scenario_coverage
+            )
 
         diff_value = row.get(DIFF_COLUMN_LABEL)
         if pd.notna(diff_value):
