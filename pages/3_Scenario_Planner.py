@@ -2,13 +2,14 @@ from __future__ import annotations
 
 from dataclasses import asdict, is_dataclass
 from typing import Dict, Iterable, List, Tuple
+from uuid import uuid4
 
 import pandas as pd
 import streamlit as st
 
-from models import Scenario
+from models import AdjustmentType, Scenario, ScenarioAdjustment
 from services.coverage import compute_theoretical_coverage
-from services.data_loader import get_data
+from services.data_loader import get_data, update_data
 from services.scenario import apply_scenario
 
 
@@ -23,6 +24,43 @@ DISPLAY_DATASETS: List[Tuple[str, str]] = [
 ]
 
 NUMERIC_PRECISION = 2
+
+
+ADJUSTMENT_MAPPING: Dict[str, Tuple[AdjustmentType, AdjustmentType, AdjustmentType]] = {
+    "employees": (
+        AdjustmentType.ADD_EMPLOYEE,
+        AdjustmentType.REMOVE_EMPLOYEE,
+        AdjustmentType.UPDATE_EMPLOYEE,
+    ),
+    "allocations": (
+        AdjustmentType.ADD_ALLOCATION,
+        AdjustmentType.REMOVE_ALLOCATION,
+        AdjustmentType.UPDATE_ALLOCATION,
+    ),
+    "support_allocations": (
+        AdjustmentType.ADD_SUPPORT_ALLOCATION,
+        AdjustmentType.REMOVE_SUPPORT_ALLOCATION,
+        AdjustmentType.UPDATE_SUPPORT_ALLOCATION,
+    ),
+    "processes": (
+        AdjustmentType.ADD_PROCESS,
+        AdjustmentType.REMOVE_PROCESS,
+        AdjustmentType.UPDATE_PROCESS,
+    ),
+    "coverage": (
+        AdjustmentType.ADD_REQUIRED_COVERAGE,
+        AdjustmentType.REMOVE_REQUIRED_COVERAGE,
+        AdjustmentType.UPDATE_REQUIRED_COVERAGE,
+    ),
+}
+
+UUID_PREFIXES: Dict[str, str] = {
+    "employees": "emp",
+    "allocations": "alloc",
+    "support_allocations": "supp",
+    "processes": "proc",
+    "coverage": "cov",
+}
 
 
 def _serialize_record(item) -> Dict:
@@ -42,10 +80,25 @@ def _items_to_dataframe(items: Iterable) -> pd.DataFrame:
     return pd.DataFrame(records)
 
 
+def _is_missing(value) -> bool:
+    if value is None or value is pd.NA:
+        return True
+    try:
+        result = pd.isna(value)
+    except Exception:
+        return False
+    if isinstance(result, (bool, int)):
+        return bool(result)
+    if hasattr(result, "all"):
+        try:
+            return bool(result.all())
+        except ValueError:
+            return False
+    return False
+
+
 def _normalize_value(value):
-    if value is None:
-        return None
-    if value is pd.NA or (hasattr(pd, "isna") and pd.isna(value)):
+    if _is_missing(value):
         return None
     if isinstance(value, float):
         return round(value, 6)
@@ -53,7 +106,7 @@ def _normalize_value(value):
 
 
 def _format_value(value) -> str:
-    if value is None or value is pd.NA or (hasattr(pd, "isna") and pd.isna(value)):
+    if _is_missing(value):
         return "—"
     if isinstance(value, float):
         if value.is_integer():
@@ -134,17 +187,24 @@ def _diff_table(dataset: str, baseline_df: pd.DataFrame, scenario_df: pd.DataFra
             base_value = baseline_record.get(column) if baseline_record else None
             scenario_value = scenario_record.get(column) if scenario_record else None
 
-            baseline_column = f"{column} (Baseline)"
-            scenario_column = f"{column} (Scenario)"
+            if scenario_record is None:
+                display_value = base_value
+            elif baseline_record is None:
+                display_value = scenario_value
+            else:
+                display_value = scenario_value
 
-            row[baseline_column] = base_value
-            row[scenario_column] = scenario_value
+            row[column] = display_value
 
             if baseline_record and scenario_record:
                 if _normalize_value(base_value) != _normalize_value(scenario_value):
                     differences.append(
                         f"{column}: {_format_value(base_value)} -> {_format_value(scenario_value)}"
                     )
+            elif baseline_record and not scenario_record:
+                differences.append(f"{column}: {_format_value(base_value)} -> —")
+            elif scenario_record and not baseline_record:
+                differences.append(f"{column}: — -> {_format_value(scenario_value)}")
 
         if diff_label in {"Added", "Removed"}:
             row[DIFF_COLUMN_LABEL] = diff_label
@@ -155,10 +215,7 @@ def _diff_table(dataset: str, baseline_df: pd.DataFrame, scenario_df: pd.DataFra
 
         display_rows.append(row)
 
-    ordered_columns = ["UUID"]
-    for column in columns:
-        ordered_columns.extend([f"{column} (Baseline)", f"{column} (Scenario)"])
-    ordered_columns.append(DIFF_COLUMN_LABEL)
+    ordered_columns = ["UUID", *columns, DIFF_COLUMN_LABEL]
 
     diff_df = pd.DataFrame(display_rows, columns=ordered_columns)
     if "UUID" in diff_df.columns:
@@ -285,6 +342,130 @@ def _style_coverage_result(df: pd.DataFrame) -> pd.io.formats.style.Styler | pd.
     return styler
 
 
+def _generate_uuid(prefix: str | None = None) -> str:
+    token = uuid4().hex[:8]
+    return f"{prefix}-{token}" if prefix else uuid4().hex
+
+
+def _prepare_records(df: pd.DataFrame) -> Dict[str, Dict]:
+    if df.empty:
+        return {}
+    normalized_df = df.copy()
+    if "uuid" not in normalized_df.columns:
+        normalized_df.insert(0, "uuid", "")
+    normalized_df = normalized_df.where(pd.notna(normalized_df), None)
+    records = normalized_df.to_dict(orient="records")
+    prepared: Dict[str, Dict] = {}
+    for record in records:
+        identifier = str(record.get("uuid") or "").strip()
+        if not identifier:
+            continue
+        cleaned: Dict[str, object] = {}
+        for key, value in record.items():
+            if hasattr(value, "item"):
+                try:
+                    cleaned[key] = value.item()
+                    continue
+                except Exception:
+                    pass
+            cleaned[key] = value
+        prepared[identifier] = cleaned
+    return prepared
+
+
+def _calculate_dataset_adjustments(
+    dataset: str,
+    baseline_df: pd.DataFrame,
+    edited_df: pd.DataFrame,
+) -> List[ScenarioAdjustment]:
+    if dataset not in ADJUSTMENT_MAPPING:
+        return []
+
+    add_type, remove_type, update_type = ADJUSTMENT_MAPPING[dataset]
+
+    baseline_records = _prepare_records(baseline_df)
+    edited_df = edited_df.copy()
+    if "uuid" not in edited_df.columns:
+        edited_df.insert(0, "uuid", "")
+
+    prefix = UUID_PREFIXES.get(dataset)
+    edited_df["uuid"] = edited_df["uuid"].apply(
+        lambda value: value if value and str(value).strip() else _generate_uuid(prefix)
+    )
+    edited_records = _prepare_records(edited_df)
+
+    baseline_ids = set(baseline_records.keys())
+    edited_ids = set(edited_records.keys())
+
+    added_ids = sorted(edited_ids - baseline_ids)
+    removed_ids = sorted(baseline_ids - edited_ids)
+    potential_updates = baseline_ids & edited_ids
+
+    adjustments: List[ScenarioAdjustment] = []
+
+    for identifier in added_ids:
+        payload = {key: value for key, value in edited_records[identifier].items() if key != "uuid"}
+        payload["uuid"] = identifier
+        adjustments.append(
+            ScenarioAdjustment(uuid=_generate_uuid("adj"), type=add_type, payload=payload)
+        )
+
+    for identifier in removed_ids:
+        adjustments.append(
+            ScenarioAdjustment(
+                uuid=_generate_uuid("adj"),
+                type=remove_type,
+                payload={"uuid": identifier},
+            )
+        )
+
+    for identifier in potential_updates:
+        baseline_record = baseline_records[identifier]
+        edited_record = edited_records[identifier]
+        if {
+            key: _normalize_value(value)
+            for key, value in baseline_record.items()
+            if key != "uuid"
+        } == {
+            key: _normalize_value(value)
+            for key, value in edited_record.items()
+            if key != "uuid"
+        }:
+            continue
+
+        payload = {key: value for key, value in edited_record.items() if key != "uuid"}
+        payload["uuid"] = identifier
+        adjustments.append(
+            ScenarioAdjustment(uuid=_generate_uuid("adj"), type=update_type, payload=payload)
+        )
+
+    return adjustments
+
+
+def _merge_adjustments(
+    scenario: Scenario,
+    dataset: str,
+    new_adjustments: List[ScenarioAdjustment],
+) -> None:
+    preserved: List[ScenarioAdjustment] = []
+    for adjustment in scenario.adjustments:
+        try:
+            collection = _collection_for_adjustment(adjustment.type)
+        except KeyError:
+            preserved.append(adjustment)
+            continue
+        if collection != dataset:
+            preserved.append(adjustment)
+    scenario.adjustments = preserved + new_adjustments
+
+
+def _collection_for_adjustment(adjustment_type: AdjustmentType) -> str:
+    for collection, types in ADJUSTMENT_MAPPING.items():
+        if adjustment_type in types:
+            return collection
+    raise KeyError(f"Unknown adjustment type: {adjustment_type}")
+
+
 def main():
     st.title("Scenario Planner")
 
@@ -322,21 +503,42 @@ def main():
     st.subheader("Scenario datasets")
     show_differences_only = st.toggle("Show only rows with differences", value=False)
 
-    with st.expander("Baseline vs scenario details", expanded=True):
-        tabs = st.tabs([label for _, label in DISPLAY_DATASETS])
-        for (dataset, label), tab in zip(DISPLAY_DATASETS, tabs):
-            with tab:
-                baseline_df = _items_to_dataframe(data.get(dataset, [])).copy()
-                scenario_df = _items_to_dataframe(modified_data.get(dataset, [])).copy()
-                diff_table = _diff_table(dataset, baseline_df, scenario_df)
+    tabs = st.tabs([label for _, label in DISPLAY_DATASETS])
+    for (dataset, label), tab in zip(DISPLAY_DATASETS, tabs):
+        with tab:
+            baseline_df = _items_to_dataframe(data.get(dataset, [])).copy()
+            scenario_df = _items_to_dataframe(modified_data.get(dataset, [])).copy()
 
-                if show_differences_only:
-                    diff_table = diff_table[diff_table[DIFF_COLUMN_LABEL] != "Unchanged"]
+            st.markdown("**Scenario data**")
+            column_config: Dict[str, object] = {}
+            if "uuid" in scenario_df.columns:
+                column_config["uuid"] = st.column_config.TextColumn("UUID", disabled=True)
 
-                if diff_table.empty:
-                    st.info("No changes detected for this dataset.")
-                else:
-                    st.dataframe(diff_table, use_container_width=True)
+            editor_df = st.data_editor(
+                scenario_df,
+                num_rows="dynamic",
+                use_container_width=True,
+                key=f"scenario_editor_{scenario.uuid}_{dataset}",
+                column_config=column_config or None,
+            )
+
+            if st.button(f"Save {label.lower()} changes", key=f"save_{scenario.uuid}_{dataset}"):
+                new_adjustments = _calculate_dataset_adjustments(dataset, baseline_df, editor_df)
+                _merge_adjustments(scenario, dataset, new_adjustments)
+                update_data("scenarios", data["scenarios"])
+                st.success(f"Scenario adjustments for {label.lower()} saved.")
+                st.experimental_rerun()
+
+            st.markdown("**Changes vs baseline**")
+            diff_table = _diff_table(dataset, baseline_df, scenario_df)
+
+            if show_differences_only:
+                diff_table = diff_table[diff_table[DIFF_COLUMN_LABEL] != "Unchanged"]
+
+            if diff_table.empty:
+                st.info("No changes detected for this dataset.")
+            else:
+                st.dataframe(diff_table, use_container_width=True)
 
     st.subheader("Scenario result")
     coverage_result = _build_coverage_result(baseline_coverage, scenario_coverage)
