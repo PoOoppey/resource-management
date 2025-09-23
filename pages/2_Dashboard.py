@@ -14,6 +14,7 @@ from services.coverage import (
     weeks_in_range,
 )
 from services.data_loader import get_data
+from utils.styling import coerce_numeric, coverage_style
 
 
 VIEW_OPTIONS = {"Theoretical": "theoretical", "Live": "live"}
@@ -27,50 +28,11 @@ DATA_DISPLAY = {
 STATIC_COLUMN_STYLE = {"background-color": "#f3f0ff", "font-style": "italic"}
 
 
-def _metric_style(background: str, text: str) -> str:
-    return f"background-color: {background}; color: {text}; font-weight: 600"
-
-
 def _default_date_range() -> tuple[date, date]:
     today = date.today()
     start = today - timedelta(days=today.weekday())
     end = start + timedelta(days=28)
     return start, end
-
-
-def _coerce_numeric(value):
-    if isinstance(value, str):
-        try:
-            # extract leading numeric portion (e.g. "123 (4)")
-            numeric = value.strip().split(" ")[0].replace(",", "")
-            return float(numeric)
-        except (ValueError, IndexError):
-            return None
-    return value
-
-
-def _colorize_cell(required: float | None, value) -> str:
-    value = _coerce_numeric(value)
-    required = _coerce_numeric(required)
-    if pd.isna(required) or pd.isna(value):
-        return ""
-
-    if required == 0:
-        if value == 0:
-            return ""
-        # highlight positive coverage when nothing was required
-        return _metric_style("#bae6fd", "#0c4a6e")
-
-    gap_ratio = (value - required) / required
-    if gap_ratio <= -0.15:
-        return _metric_style("#f87171", "#7f1d1d")
-    if gap_ratio < 0:
-        return _metric_style("#fecaca", "#7f1d1d")
-    if gap_ratio < 0.1:
-        return _metric_style("#fef08a", "#854d0e")
-    if gap_ratio < 0.25:
-        return _metric_style("#bbf7d0", "#166534")
-    return _metric_style("#86efac", "#14532d")
 
 
 def _style_dataframe(
@@ -114,7 +76,7 @@ def _style_dataframe(
             required = row.get("Required")
             styles = {}
             for column in coverage_columns:
-                styles[column] = _colorize_cell(required, row.get(column))
+                styles[column] = coverage_style(required, row.get(column))
             return pd.Series(styles)
 
         if coverage_columns:
@@ -130,7 +92,9 @@ def _style_dataframe(
 
         def _style_weeks(row: pd.Series) -> pd.Series:
             required = row.get("Required")
-            styles = {column: _colorize_cell(required, row.get(column)) for column in week_columns}
+            styles = {
+                column: coverage_style(required, row.get(column)) for column in week_columns
+            }
             return pd.Series(styles)
 
         if week_columns:
@@ -145,10 +109,10 @@ def _style_dataframe(
     has_required_column = "Required" in df.columns
 
     def _style_neutral_zero(row: pd.Series) -> pd.Series:
-        required_value = _coerce_numeric(row.get("Required"))
+        required_value = coerce_numeric(row.get("Required"))
         styles = {column: "" for column in zero_sensitive_columns}
         for column in zero_sensitive_columns:
-            value = _coerce_numeric(row.get(column))
+            value = coerce_numeric(row.get(column))
             if value == 0 and (required_value == 0 or pd.isna(required_value)):
                 styles[column] = "color: #6b7280; font-style: italic"
         return pd.Series(styles)
