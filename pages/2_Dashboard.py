@@ -27,6 +27,10 @@ DATA_DISPLAY = {
 STATIC_COLUMN_STYLE = {"background-color": "#f3f0ff", "font-style": "italic"}
 
 
+def _metric_style(background: str, text: str) -> str:
+    return f"background-color: {background}; color: {text}; font-weight: 600"
+
+
 def _default_date_range() -> tuple[date, date]:
     today = date.today()
     start = today - timedelta(days=today.weekday())
@@ -55,18 +59,18 @@ def _colorize_cell(required: float | None, value) -> str:
         if value == 0:
             return ""
         # highlight positive coverage when nothing was required
-        return "background-color: #bae6fd"
+        return _metric_style("#bae6fd", "#0c4a6e")
 
     gap_ratio = (value - required) / required
     if gap_ratio <= -0.15:
-        return "background-color: #fca5a5"
+        return _metric_style("#f87171", "#7f1d1d")
     if gap_ratio < 0:
-        return "background-color: #fecaca"
+        return _metric_style("#fecaca", "#7f1d1d")
     if gap_ratio < 0.1:
-        return "background-color: #fef08a"
+        return _metric_style("#fef08a", "#854d0e")
     if gap_ratio < 0.25:
-        return "background-color: #bbf7d0"
-    return "background-color: #86efac"
+        return _metric_style("#bbf7d0", "#166534")
+    return _metric_style("#86efac", "#14532d")
 
 
 def _style_dataframe(
@@ -177,7 +181,17 @@ def main():
                 segmented = next(iter(segmented), list(GROUP_OPTIONS.keys())[0])
             group_by_label = segmented
         with primary_row[2]:
-            unit_label = st.selectbox("Units", list(UNIT_OPTIONS.keys()))
+            unit_selection = st.segmented_control(
+                "Units",
+                list(UNIT_OPTIONS.keys()),
+                selection_mode="single",
+                default=list(UNIT_OPTIONS.keys())[0],
+            )
+            if isinstance(unit_selection, (list, tuple, set)):
+                unit_selection = next(
+                    iter(unit_selection), list(UNIT_OPTIONS.keys())[0]
+                )
+            unit_label = unit_selection or list(UNIT_OPTIONS.keys())[0]
 
         view = VIEW_OPTIONS[view_label]
         data_options = DATA_DISPLAY[view]
