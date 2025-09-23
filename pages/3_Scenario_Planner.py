@@ -223,6 +223,59 @@ def _diff_table(dataset: str, baseline_df: pd.DataFrame, scenario_df: pd.DataFra
     return diff_df
 
 
+def _build_diff_annotations(
+    baseline_df: pd.DataFrame, scenario_df: pd.DataFrame
+) -> Tuple[List[str], List[str]]:
+    baseline_df = baseline_df.copy()
+    scenario_df = scenario_df.copy()
+
+    if not baseline_df.empty and "uuid" not in baseline_df.columns:
+        baseline_df.insert(0, "uuid", "")
+    if not scenario_df.empty and "uuid" not in scenario_df.columns:
+        scenario_df.insert(0, "uuid", "")
+
+    baseline_records = _prepare_records(baseline_df)
+
+    annotations: List[str] = []
+    scenario_uuids: List[str] = []
+
+    comparison_columns: List[str] = [
+        column for column in scenario_df.columns if column not in {"uuid", DIFF_COLUMN_LABEL}
+    ]
+
+    for _, row in scenario_df.iterrows():
+        uuid_value = str(row.get("uuid") or "").strip()
+        scenario_uuids.append(uuid_value)
+
+        if not uuid_value:
+            annotations.append("Added")
+            continue
+
+        baseline_record = baseline_records.get(uuid_value)
+        if baseline_record is None:
+            annotations.append("Added")
+            continue
+
+        differences: List[str] = []
+        for column in comparison_columns:
+            baseline_value = baseline_record.get(column)
+            scenario_value = row.get(column)
+            if _normalize_value(baseline_value) != _normalize_value(scenario_value):
+                differences.append(
+                    f"{column}: {_format_value(baseline_value)} -> {_format_value(scenario_value)}"
+                )
+
+        if differences:
+            annotations.append(", ".join(differences))
+        else:
+            annotations.append("Unchanged")
+
+    baseline_uuid_set = set(baseline_records.keys())
+    scenario_uuid_set = {uuid for uuid in scenario_uuids if uuid}
+    removed = sorted(baseline_uuid_set - scenario_uuid_set)
+    return annotations, removed
+
+
 def _scenario_select(scenarios: List[Scenario]) -> Scenario | None:
     if not scenarios:
         return None
@@ -292,17 +345,23 @@ def _build_coverage_result(
     if "Coverage (Scenario)" not in merged.columns and "Coverage" in scenario.columns:
         merged = merged.rename(columns={"Coverage": "Coverage (Scenario)"})
 
-    merged[DIFF_COLUMN_LABEL] = (
+    merged["Required Diff"] = (
+        merged.get("Required (Scenario)", 0.0) - merged.get("Required (Baseline)", 0.0)
+    )
+    merged["Coverage Diff"] = (
         merged.get("Coverage (Scenario)", 0.0) - merged.get("Coverage (Baseline)", 0.0)
+    )
+
+    merged = merged.rename(
+        columns={"Required (Scenario)": "Required", "Coverage (Scenario)": "Coverage"}
     )
 
     ordered_columns = [
         *common_columns,
-        "Required (Baseline)",
-        "Required (Scenario)",
-        "Coverage (Baseline)",
-        "Coverage (Scenario)",
-        DIFF_COLUMN_LABEL,
+        "Required",
+        "Required Diff",
+        "Coverage",
+        "Coverage Diff",
     ]
     ordered_columns = [col for col in ordered_columns if col in merged.columns]
     return merged[ordered_columns]
@@ -312,33 +371,45 @@ def _style_coverage_result(df: pd.DataFrame) -> pd.io.formats.style.Styler | pd.
     if df.empty:
         return df
 
-    styler = df.style.format(
-        {col: _format_coverage_value for col in df.columns if col not in {"Region", "Office", "Process"}}
-    )
+    numeric_df = df.copy()
+    display_df = df.copy()
+
+    def _format_with_diff(value: float | None, diff: float | None) -> str:
+        if value is None or pd.isna(value):
+            return "—"
+        value_str = _format_coverage_value(value)
+        if diff is None or pd.isna(diff) or diff == 0:
+            return value_str
+        diff_str = _format_coverage_value(abs(diff))
+        sign = "+" if diff > 0 else "-"
+        return f"{value_str} ({sign}{diff_str})"
+
+    if "Required" in display_df.columns and "Required Diff" in display_df.columns:
+        display_df["Required"] = display_df.apply(
+            lambda row: _format_with_diff(row.get("Required"), row.get("Required Diff")), axis=1
+        )
+    if "Coverage" in display_df.columns and "Coverage Diff" in display_df.columns:
+        display_df["Coverage"] = display_df.apply(
+            lambda row: _format_with_diff(row.get("Coverage"), row.get("Coverage Diff")), axis=1
+        )
+
+    drop_columns = [column for column in ["Required Diff", "Coverage Diff"] if column in display_df.columns]
+    display_df = display_df.drop(columns=drop_columns)
+
+    styler = display_df.style
 
     def _style_row(row: pd.Series) -> pd.Series:
         styles: Dict[str, str] = {}
-        baseline_required = row.get("Required (Baseline)")
-        baseline_coverage = row.get("Coverage (Baseline)")
-        scenario_required = row.get("Required (Scenario)")
-        scenario_coverage = row.get("Coverage (Scenario)")
+        numeric_row = numeric_df.loc[row.name]
+        scenario_required = numeric_row.get("Required")
+        scenario_coverage = numeric_row.get("Coverage")
 
-        if "Coverage (Baseline)" in df.columns:
-            styles["Coverage (Baseline)"] = _colorize_cell(baseline_required, baseline_coverage)
-        if "Coverage (Scenario)" in df.columns:
-            styles["Coverage (Scenario)"] = _colorize_cell(scenario_required, scenario_coverage)
-
-        diff_value = row.get(DIFF_COLUMN_LABEL)
-        if pd.notna(diff_value):
-            if diff_value > 0:
-                styles[DIFF_COLUMN_LABEL] = "color: #166534"
-            elif diff_value < 0:
-                styles[DIFF_COLUMN_LABEL] = "color: #b91c1c"
-            else:
-                styles[DIFF_COLUMN_LABEL] = "color: #4b5563"
+        if "Coverage" in display_df.columns:
+            styles["Coverage"] = _colorize_cell(scenario_required, scenario_coverage)
         return pd.Series(styles)
 
     styler = styler.apply(_style_row, axis=1)
+    styler = styler.hide(axis="index")
     return styler
 
 
@@ -385,6 +456,7 @@ def _calculate_dataset_adjustments(
 
     baseline_records = _prepare_records(baseline_df)
     edited_df = edited_df.copy()
+    edited_df = edited_df.drop(columns=[DIFF_COLUMN_LABEL], errors="ignore")
     if "uuid" not in edited_df.columns:
         edited_df.insert(0, "uuid", "")
 
@@ -510,35 +582,52 @@ def main():
             scenario_df = _items_to_dataframe(modified_data.get(dataset, [])).copy()
 
             st.markdown("**Scenario data**")
-            column_config: Dict[str, object] = {}
-            if "uuid" in scenario_df.columns:
-                column_config["uuid"] = st.column_config.TextColumn("UUID", disabled=True)
+            annotations, removed_items = _build_diff_annotations(baseline_df, scenario_df)
 
-            editor_df = st.data_editor(
-                scenario_df,
-                num_rows="dynamic",
-                use_container_width=True,
-                key=f"scenario_editor_{scenario.uuid}_{dataset}",
-                column_config=column_config or None,
+            scenario_display_df = scenario_df.copy()
+            if not scenario_display_df.empty and "uuid" not in scenario_display_df.columns:
+                scenario_display_df.insert(0, "uuid", "")
+            scenario_display_df[DIFF_COLUMN_LABEL] = annotations
+
+            column_config: Dict[str, object] = {}
+            if "uuid" in scenario_display_df.columns:
+                column_config["uuid"] = st.column_config.TextColumn("UUID", disabled=True)
+            column_config[DIFF_COLUMN_LABEL] = st.column_config.TextColumn(
+                DIFF_COLUMN_LABEL, disabled=True
             )
 
-            if st.button(f"Save {label.lower()} changes", key=f"save_{scenario.uuid}_{dataset}"):
-                new_adjustments = _calculate_dataset_adjustments(dataset, baseline_df, editor_df)
+            display_df = scenario_display_df
+            if show_differences_only:
+                display_df = scenario_display_df[scenario_display_df[DIFF_COLUMN_LABEL] != "Unchanged"].copy()
+
+            editor_result: pd.DataFrame | None = None
+            if show_differences_only:
+                if display_df.empty:
+                    st.info("No changes detected for this dataset.")
+                else:
+                    st.dataframe(display_df, use_container_width=True)
+            else:
+                editor_result = st.data_editor(
+                    display_df,
+                    num_rows="dynamic",
+                    use_container_width=True,
+                    key=f"scenario_editor_{scenario.uuid}_{dataset}",
+                    column_config=column_config or None,
+                )
+
+            if removed_items:
+                removed_label = ", ".join(removed_items)
+                st.caption(f"Removed entries: {removed_label}")
+
+            if not show_differences_only and st.button(
+                f"Save {label.lower()} changes", key=f"save_{scenario.uuid}_{dataset}"
+            ):
+                cleaned_editor_df = editor_result.drop(columns=[DIFF_COLUMN_LABEL], errors="ignore")
+                new_adjustments = _calculate_dataset_adjustments(dataset, baseline_df, cleaned_editor_df)
                 _merge_adjustments(scenario, dataset, new_adjustments)
                 update_data("scenarios", data["scenarios"])
                 st.success(f"Scenario adjustments for {label.lower()} saved.")
                 st.experimental_rerun()
-
-            st.markdown("**Changes vs baseline**")
-            diff_table = _diff_table(dataset, baseline_df, scenario_df)
-
-            if show_differences_only:
-                diff_table = diff_table[diff_table[DIFF_COLUMN_LABEL] != "Unchanged"]
-
-            if diff_table.empty:
-                st.info("No changes detected for this dataset.")
-            else:
-                st.dataframe(diff_table, use_container_width=True)
 
     st.subheader("Scenario result")
     coverage_result = _build_coverage_result(baseline_coverage, scenario_coverage)
