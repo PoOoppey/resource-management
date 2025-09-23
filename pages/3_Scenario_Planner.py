@@ -1,80 +1,28 @@
 from __future__ import annotations
 
-import json
 from dataclasses import asdict, is_dataclass
-from enum import Enum
 from typing import Dict, Iterable, List, Tuple
-from uuid import uuid4
 
 import pandas as pd
 import streamlit as st
 
-from models import AdjustmentType, Scenario, ScenarioAdjustment
+from models import Scenario
 from services.coverage import compute_theoretical_coverage
-from services.data_loader import get_data, update_data
-from services.scenario import apply_scenario, compare_scenario
-from utils.notifications import notify
+from services.data_loader import get_data
+from services.scenario import apply_scenario
 
-
-DATASET_ORDER: Tuple[str, ...] = (
-    "employees",
-    "allocations",
-    "support_allocations",
-    "coverage",
-)
-
-UUID_PREFIX = {
-    "employees": "emp",
-    "allocations": "alc",
-    "support_allocations": "sup",
-    "coverage": "cov",
-}
 
 DIFF_COLUMN_LABEL = "Diff vs baseline"
 
-NUMERIC_FIELDS = {
-    "employees": ["working_hours"],
-    "allocations": ["percentage", "weight"],
-    "support_allocations": ["percentage", "weight"],
-    "coverage": ["required_hours"],
-}
+DISPLAY_DATASETS: List[Tuple[str, str]] = [
+    ("employees", "Employees"),
+    ("allocations", "Allocations"),
+    ("support_allocations", "Support allocations"),
+    ("processes", "Processes"),
+    ("coverage", "Required coverage"),
+]
 
-REQUIRED_FIELDS = {
-    "employees": [
-        "uuid",
-        "first_name",
-        "last_name",
-        "trigram",
-        "office_uuid",
-        "working_hours",
-    ],
-    "allocations": ["uuid", "employee_uuid", "role_uuid", "percentage"],
-    "support_allocations": ["uuid", "allocation_uuid", "process_uuid", "percentage"],
-    "coverage": ["uuid", "process_uuid", "office_uuid", "required_hours"],
-}
-
-ADJUSTMENT_TYPES: Dict[str, Dict[str, AdjustmentType]] = {
-    "employees": {
-        "add": AdjustmentType.ADD_EMPLOYEE,
-        "update": AdjustmentType.UPDATE_EMPLOYEE,
-        "remove": AdjustmentType.REMOVE_EMPLOYEE,
-    },
-    "allocations": {
-        "add": AdjustmentType.ADD_ALLOCATION,
-        "update": AdjustmentType.UPDATE_ALLOCATION,
-        "remove": AdjustmentType.REMOVE_ALLOCATION,
-    },
-    "support_allocations": {
-        "add": AdjustmentType.ADD_SUPPORT_ALLOCATION,
-        "update": AdjustmentType.UPDATE_SUPPORT_ALLOCATION,
-        "remove": AdjustmentType.REMOVE_SUPPORT_ALLOCATION,
-    },
-    "coverage": {
-        "add": AdjustmentType.ADD_REQUIRED_COVERAGE,
-        "update": AdjustmentType.UPDATE_REQUIRED_COVERAGE,
-        "remove": AdjustmentType.REMOVE_REQUIRED_COVERAGE,
-    },
-}
+NUMERIC_PRECISION = 2
 
 
 def _serialize_record(item) -> Dict:
@@ -84,9 +32,6 @@ def _serialize_record(item) -> Dict:
         record = {**item.__dict__}
     else:
         record = dict(item)
-    for key, value in list(record.items()):
-        if isinstance(value, Enum):
-            record[key] = value.value
     return record
 
 
@@ -97,280 +42,267 @@ def _items_to_dataframe(items: Iterable) -> pd.DataFrame:
     return pd.DataFrame(records)
 
 
-def _ensure_uuid_column(dataset: str, df: pd.DataFrame) -> pd.DataFrame:
-    if "uuid" not in df.columns:
-        df.insert(0, "uuid", "")
-    for index, value in df["uuid"].items():
-        if pd.isna(value) or not str(value).strip():
-            df.at[index, "uuid"] = f"{UUID_PREFIX.get(dataset, 'id')}-{uuid4().hex[:8]}"
-    return df
-
-
-def _coerce_numeric(dataset: str, record: Dict) -> Dict:
-    for field in NUMERIC_FIELDS.get(dataset, []):
-        if record.get(field) is not None:
-            try:
-                record[field] = float(record[field])
-            except (TypeError, ValueError):
-                record[field] = None
-    return record
-
-
-def _records_from_dataframe(dataset: str, df: pd.DataFrame) -> List[Dict]:
-    if df is None or df.empty:
-        return []
-    records: List[Dict] = []
-    for raw in df.to_dict(orient="records"):
-        record = {}
-        for key, value in raw.items():
-            if pd.isna(value):
-                record[key] = None
-            else:
-                record[key] = value
-        record = _coerce_numeric(dataset, record)
-        records.append(record)
-    return records
-
-
 def _normalize_value(value):
+    if value is None:
+        return None
+    if value is pd.NA or (hasattr(pd, "isna") and pd.isna(value)):
+        return None
     if isinstance(value, float):
         return round(value, 6)
     return value
 
 
-def _records_equal(left: Dict, right: Dict) -> bool:
-    left_clean = {k: _normalize_value(v) for k, v in left.items() if k != "uuid"}
-    right_clean = {k: _normalize_value(v) for k, v in right.items() if k != "uuid"}
-    keys = set(left_clean) | set(right_clean)
-    return all(left_clean.get(key) == right_clean.get(key) for key in keys)
+def _format_value(value) -> str:
+    if value is None or value is pd.NA or (hasattr(pd, "isna") and pd.isna(value)):
+        return "—"
+    if isinstance(value, float):
+        if value.is_integer():
+            return f"{int(value)}"
+        return f"{value:.{NUMERIC_PRECISION}f}".rstrip("0").rstrip(".")
+    return str(value)
 
 
-def _has_required_fields(dataset: str, record: Dict) -> Tuple[bool, List[str]]:
-    required = REQUIRED_FIELDS.get(dataset, [])
-    missing = [field for field in required if not record.get(field)]
-    return (not missing, missing)
+def _diff_table(dataset: str, baseline_df: pd.DataFrame, scenario_df: pd.DataFrame) -> pd.DataFrame:
+    if baseline_df is None:
+        baseline_df = pd.DataFrame()
+    if scenario_df is None:
+        scenario_df = pd.DataFrame()
 
+    baseline_df = baseline_df.copy()
+    scenario_df = scenario_df.copy()
 
-def _derive_adjustments(
-    dataset: str, baseline: List[Dict], updated: List[Dict]
-) -> Tuple[List[Dict], List[str]]:
-    adjustments: List[Dict] = []
-    issues: List[str] = []
+    if "uuid" not in baseline_df.columns and not baseline_df.empty:
+        baseline_df.insert(0, "uuid", "")
+    if "uuid" not in scenario_df.columns and not scenario_df.empty:
+        scenario_df.insert(0, "uuid", "")
 
-    baseline_map = {record["uuid"]: record for record in baseline if record.get("uuid")}
-    updated_map = {record["uuid"]: record for record in updated if record.get("uuid")}
+    baseline_records = (
+        baseline_df.where(pd.notna(baseline_df), None).to_dict(orient="records")
+        if not baseline_df.empty
+        else []
+    )
+    scenario_records = (
+        scenario_df.where(pd.notna(scenario_df), None).to_dict(orient="records")
+        if not scenario_df.empty
+        else []
+    )
 
-    for uuid, record in updated_map.items():
-        if uuid not in baseline_map:
-            valid, missing = _has_required_fields(dataset, record)
-            if not valid:
-                issues.append(
-                    f"{dataset.title()} entry {uuid} is missing required fields: {', '.join(missing)}"
-                )
+    baseline_map = {
+        record.get("uuid", f"baseline-{index}"): record
+        for index, record in enumerate(baseline_records)
+    }
+    scenario_map = {
+        record.get("uuid", f"scenario-{index}"): record
+        for index, record in enumerate(scenario_records)
+    }
+
+    all_keys = sorted(set(baseline_map) | set(scenario_map))
+
+    columns: List[str] = []
+    for df in (baseline_df, scenario_df):
+        for column in df.columns:
+            if column == "uuid":
                 continue
-            adjustments.append(
-                {
-                    "uuid": f"adj-{uuid4().hex[:8]}",
-                    "type": ADJUSTMENT_TYPES[dataset]["add"],
-                    "payload": record,
-                }
-            )
+            if column not in columns:
+                columns.append(column)
+
+    display_rows: List[Dict] = []
+
+    for key in all_keys:
+        baseline_record = baseline_map.get(key)
+        scenario_record = scenario_map.get(key)
+
+        display_uuid = None
+        if baseline_record and baseline_record.get("uuid"):
+            display_uuid = baseline_record.get("uuid")
+        elif scenario_record and scenario_record.get("uuid"):
+            display_uuid = scenario_record.get("uuid")
         else:
-            baseline_record = baseline_map[uuid]
-            if not _records_equal(baseline_record, record):
-                valid, missing = _has_required_fields(dataset, record)
-                if not valid:
-                    issues.append(
-                        f"{dataset.title()} entry {uuid} is missing required fields: {', '.join(missing)}"
+            display_uuid = key
+
+        row: Dict[str, object] = {"UUID": display_uuid}
+        differences: List[str] = []
+
+        if baseline_record and not scenario_record:
+            diff_label = "Removed"
+        elif scenario_record and not baseline_record:
+            diff_label = "Added"
+        else:
+            diff_label = "Unchanged"
+
+        for column in columns:
+            base_value = baseline_record.get(column) if baseline_record else None
+            scenario_value = scenario_record.get(column) if scenario_record else None
+
+            baseline_column = f"{column} (Baseline)"
+            scenario_column = f"{column} (Scenario)"
+
+            row[baseline_column] = base_value
+            row[scenario_column] = scenario_value
+
+            if baseline_record and scenario_record:
+                if _normalize_value(base_value) != _normalize_value(scenario_value):
+                    differences.append(
+                        f"{column}: {_format_value(base_value)} -> {_format_value(scenario_value)}"
                     )
-                    continue
-                adjustments.append(
-                    {
-                        "uuid": f"adj-{uuid4().hex[:8]}",
-                        "type": ADJUSTMENT_TYPES[dataset]["update"],
-                        "payload": record,
-                    }
-                )
 
-    for uuid in baseline_map:
-        if uuid not in updated_map:
-            adjustments.append(
-                {
-                    "uuid": f"adj-{uuid4().hex[:8]}",
-                    "type": ADJUSTMENT_TYPES[dataset]["remove"],
-                    "payload": {"uuid": uuid},
-                }
-            )
+        if diff_label in {"Added", "Removed"}:
+            row[DIFF_COLUMN_LABEL] = diff_label
+        elif differences:
+            row[DIFF_COLUMN_LABEL] = ", ".join(differences)
+        else:
+            row[DIFF_COLUMN_LABEL] = "Unchanged"
 
-    return adjustments, issues
+        display_rows.append(row)
+
+    ordered_columns = ["UUID"]
+    for column in columns:
+        ordered_columns.extend([f"{column} (Baseline)", f"{column} (Scenario)"])
+    ordered_columns.append(DIFF_COLUMN_LABEL)
+
+    diff_df = pd.DataFrame(display_rows, columns=ordered_columns)
+    if "UUID" in diff_df.columns:
+        diff_df = diff_df.sort_values(by="UUID", kind="stable")
+    return diff_df
 
 
 def _scenario_select(scenarios: List[Scenario]) -> Scenario | None:
-    options = {"Create new scenario": None}
-    options.update({scenario.name: scenario for scenario in scenarios})
-    choice = st.selectbox(
-        "Scenario",
-        list(options.keys()),
-        key="scenario_select",
-    )
+    if not scenarios:
+        return None
+    options = {scenario.name: scenario for scenario in scenarios}
+    choice = st.selectbox("Scenario", list(options.keys()))
     return options[choice]
 
 
-def _scenario_state_key() -> str:
-    return "scenario_editor_state"
+def _coerce_numeric(value):
+    if isinstance(value, str):
+        try:
+            numeric = value.strip().split(" ")[0].replace(",", "")
+            return float(numeric)
+        except (ValueError, IndexError):
+            return None
+    return value
 
 
-def _initialize_state(active_uuid: str | None, scenario: Scenario | None, data: Dict) -> None:
-    state = st.session_state.setdefault(
-        _scenario_state_key(),
-        {
-            "active_uuid": None,
-            "scenario_name": "",
-            "datasets": {},
-            "adjustments": [],
-            "issues": [],
-            "comparison": None,
-            "last_signature": None,
-        },
-    )
+def _colorize_cell(required: float | None, value) -> str:
+    value = _coerce_numeric(value)
+    required = _coerce_numeric(required)
+    if pd.isna(required) or pd.isna(value):
+        return ""
 
-    if state.get("active_uuid") == active_uuid:
-        return
+    if required == 0:
+        if value == 0:
+            return ""
+        return "background-color: #bae6fd"
 
-    datasets = {}
-    if scenario is None:
-        state["scenario_name"] = ""
-        for dataset in DATASET_ORDER:
-            datasets[dataset] = _ensure_uuid_column(
-                dataset, _items_to_dataframe(data.get(dataset, [])).copy()
-            )
-    else:
-        state["scenario_name"] = scenario.name
-        modified = apply_scenario(data, scenario)
-        for dataset in DATASET_ORDER:
-            datasets[dataset] = _ensure_uuid_column(
-                dataset, _items_to_dataframe(modified.get(dataset, [])).copy()
-            )
-
-    state["active_uuid"] = scenario.uuid if scenario else None
-    state["datasets"] = datasets
-    state["adjustments"] = []
-    state["issues"] = []
-    state["comparison"] = None
-    state["last_signature"] = None
-    st.session_state["scenario_name_input"] = state["scenario_name"]
-    st.session_state["scenario_select"] = scenario.name if scenario else "Create new scenario"
+    gap_ratio = (value - required) / required
+    if gap_ratio <= -0.15:
+        return "background-color: #fca5a5"
+    if gap_ratio < 0:
+        return "background-color: #fecaca"
+    if gap_ratio < 0.1:
+        return "background-color: #fef08a"
+    if gap_ratio < 0.25:
+        return "background-color: #bbf7d0"
+    return "background-color: #86efac"
 
 
-def _build_adjustments(data: Dict) -> Tuple[List[ScenarioAdjustment], List[str]]:
-    state = st.session_state[_scenario_state_key()]
-    adjustments: List[ScenarioAdjustment] = []
-    issues: List[str] = []
-
-    for dataset in DATASET_ORDER:
-        baseline_records = _records_from_dataframe(dataset, _items_to_dataframe(data.get(dataset, [])))
-        updated_df = state["datasets"].get(dataset, pd.DataFrame())
-        updated_records = _records_from_dataframe(dataset, updated_df)
-        dataset_adjustments, dataset_issues = _derive_adjustments(
-            dataset, baseline_records, updated_records
-        )
-        issues.extend(dataset_issues)
-        for adjustment in dataset_adjustments:
-            adjustments.append(
-                ScenarioAdjustment(
-                    uuid=adjustment["uuid"],
-                    type=adjustment["type"],
-                    payload=adjustment["payload"],
-                )
-            )
-
-    return adjustments, issues
+def _format_coverage_value(value: float | None) -> str:
+    if value is None or pd.isna(value):
+        return "—"
+    if abs(value) < 1:
+        return f"{value:.2f}"
+    return f"{value:.1f}"
 
 
-def _diff_dataframe(
-    dataset: str, baseline_df: pd.DataFrame, scenario_df: pd.DataFrame
+def _build_coverage_result(
+    baseline: pd.DataFrame, scenario: pd.DataFrame
 ) -> pd.DataFrame:
-    baseline_records = _records_from_dataframe(dataset, baseline_df)
-    scenario_records = _records_from_dataframe(dataset, scenario_df)
+    common_columns = [col for col in ["Region", "Office", "Process"] if col in baseline.columns]
+    merged = baseline.merge(
+        scenario,
+        on=common_columns,
+        how="outer",
+        suffixes=(" (Baseline)", " (Scenario)"),
+    ).fillna(0.0)
 
-    baseline_map = {record["uuid"]: record for record in baseline_records if record.get("uuid")}
-    scenario_map = {record["uuid"]: record for record in scenario_records if record.get("uuid")}
+    if "Required (Baseline)" not in merged.columns and "Required" in baseline.columns:
+        merged = merged.rename(columns={"Required": "Required (Baseline)"})
+    if "Coverage (Baseline)" not in merged.columns and "Coverage" in baseline.columns:
+        merged = merged.rename(columns={"Coverage": "Coverage (Baseline)"})
+    if "Required (Scenario)" not in merged.columns and "Required" in scenario.columns:
+        merged = merged.rename(columns={"Required": "Required (Scenario)"})
+    if "Coverage (Scenario)" not in merged.columns and "Coverage" in scenario.columns:
+        merged = merged.rename(columns={"Coverage": "Coverage (Scenario)"})
 
-    columns = list(scenario_df.columns)
-    for column in baseline_df.columns:
-        if column not in columns:
-            columns.append(column)
-
-    rows: List[Dict] = []
-    status_order = {"Added": 0, "Updated": 1, "Removed": 2, "Unchanged": 3}
-
-    for record in scenario_records:
-        uuid = record.get("uuid")
-        row = {column: record.get(column) for column in columns}
-        if uuid and uuid in baseline_map:
-            baseline_record = baseline_map[uuid]
-            status = "Updated" if not _records_equal(baseline_record, record) else "Unchanged"
-        else:
-            status = "Added"
-        row[DIFF_COLUMN_LABEL] = status
-        row["_diff_order"] = status_order.get(status, 99)
-        rows.append(row)
-
-    for uuid, record in baseline_map.items():
-        if uuid not in scenario_map:
-            row = {column: record.get(column) for column in columns}
-            row[DIFF_COLUMN_LABEL] = "Removed"
-            row["_diff_order"] = status_order.get("Removed", 99)
-            rows.append(row)
-
-    if not rows:
-        return pd.DataFrame(columns=[*columns, DIFF_COLUMN_LABEL])
-
-    diff_df = pd.DataFrame(rows)
-    diff_df = diff_df.sort_values(by=["_diff_order", "uuid"], kind="stable")
-    if "_diff_order" in diff_df.columns:
-        diff_df = diff_df.drop(columns=["_diff_order"])
-
-    ordered_columns = [column for column in columns if column in diff_df.columns]
-    if DIFF_COLUMN_LABEL in diff_df.columns:
-        ordered_columns.append(DIFF_COLUMN_LABEL)
-
-    return diff_df[ordered_columns]
-
-
-def _render_dataset_editor(dataset: str, baseline_df: pd.DataFrame) -> None:
-    state = st.session_state[_scenario_state_key()]
-    scenario_df = state["datasets"].get(dataset, pd.DataFrame()).copy()
-    scenario_df = _ensure_uuid_column(dataset, scenario_df)
-    st.markdown("#### Scenario entries")
-    edited_df = st.data_editor(
-        scenario_df,
-        num_rows="dynamic",
-        use_container_width=True,
-        key=f"editor_{dataset}",
-        column_config={
-            "uuid": st.column_config.TextColumn("UUID", disabled=True),
-        },
+    merged[DIFF_COLUMN_LABEL] = (
+        merged.get("Coverage (Scenario)", 0.0) - merged.get("Coverage (Baseline)", 0.0)
     )
-    updated_df = _ensure_uuid_column(dataset, edited_df.copy())
-    state["datasets"][dataset] = updated_df
 
-    st.markdown("#### Scenario vs baseline")
-    diff_df = _diff_dataframe(dataset, baseline_df, updated_df)
-    st.dataframe(
-        diff_df,
-        use_container_width=True,
-        column_config={
-            "uuid": st.column_config.TextColumn("UUID", disabled=True),
-            DIFF_COLUMN_LABEL: st.column_config.TextColumn(DIFF_COLUMN_LABEL, disabled=True),
-        },
+    ordered_columns = [
+        *common_columns,
+        "Required (Baseline)",
+        "Required (Scenario)",
+        "Coverage (Baseline)",
+        "Coverage (Scenario)",
+        DIFF_COLUMN_LABEL,
+    ]
+    ordered_columns = [col for col in ordered_columns if col in merged.columns]
+    return merged[ordered_columns]
+
+
+def _style_coverage_result(df: pd.DataFrame) -> pd.io.formats.style.Styler | pd.DataFrame:
+    if df.empty:
+        return df
+
+    styler = df.style.format(
+        {col: _format_coverage_value for col in df.columns if col not in {"Region", "Office", "Process"}}
     )
+
+    def _style_row(row: pd.Series) -> pd.Series:
+        styles: Dict[str, str] = {}
+        baseline_required = row.get("Required (Baseline)")
+        baseline_coverage = row.get("Coverage (Baseline)")
+        scenario_required = row.get("Required (Scenario)")
+        scenario_coverage = row.get("Coverage (Scenario)")
+
+        if "Coverage (Baseline)" in df.columns:
+            styles["Coverage (Baseline)"] = _colorize_cell(baseline_required, baseline_coverage)
+        if "Coverage (Scenario)" in df.columns:
+            styles["Coverage (Scenario)"] = _colorize_cell(scenario_required, scenario_coverage)
+
+        diff_value = row.get(DIFF_COLUMN_LABEL)
+        if pd.notna(diff_value):
+            if diff_value > 0:
+                styles[DIFF_COLUMN_LABEL] = "color: #166534"
+            elif diff_value < 0:
+                styles[DIFF_COLUMN_LABEL] = "color: #b91c1c"
+            else:
+                styles[DIFF_COLUMN_LABEL] = "color: #4b5563"
+        return pd.Series(styles)
+
+    styler = styler.apply(_style_row, axis=1)
+    return styler
 
 
 def main():
     st.title("Scenario Planner")
 
     data = get_data()
+    scenarios = data.get("scenarios", [])
+
+    if not scenarios:
+        st.info("No scenarios available. Create a scenario in the data management page.")
+        return
+
+    st.subheader("Scenario selection")
+    scenario = _scenario_select(scenarios)
+
+    if scenario is None:
+        st.info("Select a scenario to view its impact against the baseline.")
+        return
+
+    st.markdown("---")
 
     baseline_coverage = compute_theoretical_coverage(
         data,
@@ -379,122 +311,37 @@ def main():
         unit="hours",
     )
 
-    st.subheader("Scenario selection")
-    scenarios = data.get("scenarios", [])
-    scenario = _scenario_select(scenarios)
-
-    active_uuid = scenario.uuid if scenario else None
-    _initialize_state(active_uuid, scenario, data)
-    state = st.session_state[_scenario_state_key()]
-
-    state["scenario_name"] = st.text_input(
-        "Scenario name",
-        value=state.get("scenario_name", ""),
-        key="scenario_name_input",
+    modified_data = apply_scenario(data, scenario)
+    scenario_coverage = compute_theoretical_coverage(
+        modified_data,
+        view="process",
+        group_by="office",
+        unit="hours",
     )
 
-    st.markdown("---")
-    st.subheader("Baseline coverage")
-    st.dataframe(baseline_coverage, use_container_width=True)
+    st.subheader("Scenario datasets")
+    show_differences_only = st.toggle("Show only rows with differences", value=False)
 
-    st.subheader("Scenario data entry")
-    tab_labels = [dataset.replace("_", " ").title() for dataset in DATASET_ORDER]
-    tabs = st.tabs(tab_labels)
-    for dataset, tab in zip(DATASET_ORDER, tabs):
-        with tab:
-            baseline_df = _items_to_dataframe(data.get(dataset, [])).copy()
-            baseline_df = _ensure_uuid_column(dataset, baseline_df)
-            st.caption("Baseline data")
-            st.dataframe(
-                baseline_df,
-                use_container_width=True,
-                column_config={"uuid": st.column_config.TextColumn("UUID", disabled=True)},
-            )
-            _render_dataset_editor(dataset, baseline_df)
+    with st.expander("Baseline vs scenario details", expanded=True):
+        tabs = st.tabs([label for _, label in DISPLAY_DATASETS])
+        for (dataset, label), tab in zip(DISPLAY_DATASETS, tabs):
+            with tab:
+                baseline_df = _items_to_dataframe(data.get(dataset, [])).copy()
+                scenario_df = _items_to_dataframe(modified_data.get(dataset, [])).copy()
+                diff_table = _diff_table(dataset, baseline_df, scenario_df)
 
-    adjustments, issues = _build_adjustments(data)
-    state["adjustments"] = adjustments
-    state["issues"] = issues
+                if show_differences_only:
+                    diff_table = diff_table[diff_table[DIFF_COLUMN_LABEL] != "Unchanged"]
 
-    signature_payload = [
-        {"uuid": adj.uuid, "type": adj.type.value, "payload": adj.payload}
-        for adj in adjustments
-    ]
-    signature = json.dumps(signature_payload, sort_keys=True)
-    if state.get("last_signature") and state.get("last_signature") != signature:
-        state["comparison"] = None
-    state["last_signature"] = signature
+                if diff_table.empty:
+                    st.info("No changes detected for this dataset.")
+                else:
+                    st.dataframe(diff_table, use_container_width=True)
 
-    if issues:
-        st.warning("\n".join(issues))
-
-    st.markdown("---")
-    st.subheader("Scenario adjustments")
-    if adjustments:
-        adjustments_df = pd.DataFrame(
-            [
-                {
-                    "uuid": adjustment.uuid,
-                    "type": adjustment.type.value,
-                    "payload": adjustment.payload,
-                }
-                for adjustment in adjustments
-            ]
-        )
-        st.dataframe(adjustments_df, use_container_width=True)
-    else:
-        st.info("No adjustments detected. Edit the scenario tables to create adjustments.")
-
-    recompute = st.button("Recompute scenario", type="primary")
-    if recompute and not issues:
-        scenario_uuid = state.get("active_uuid") or f"scn-{uuid4().hex[:8]}"
-        scenario_name = state.get("scenario_name") or "Untitled scenario"
-        scenario_model = Scenario(
-            uuid=scenario_uuid,
-            name=scenario_name,
-            adjustments=adjustments,
-        )
-        modified_data = apply_scenario(data, scenario_model)
-        scenario_coverage = compute_theoretical_coverage(
-            modified_data,
-            view="process",
-            group_by="office",
-            unit="hours",
-        )
-        comparison = compare_scenario(baseline_coverage, scenario_coverage)
-        state["comparison"] = comparison
-        notify("Scenario recomputed successfully.", level="success")
-    elif recompute and issues:
-        notify("Please resolve missing information before recomputing.", level="error")
-
-    if state.get("comparison") is not None:
-        st.subheader("Coverage comparison")
-        st.dataframe(state["comparison"], use_container_width=True)
-
-    if st.button("Save scenario"):
-        if issues:
-            notify("Cannot save scenario with validation issues.", level="error")
-        else:
-            scenario_uuid = state.get("active_uuid") or f"scn-{uuid4().hex[:8]}"
-            scenario_name = state.get("scenario_name") or "Untitled scenario"
-            scenario_model = Scenario(
-                uuid=scenario_uuid,
-                name=scenario_name,
-                adjustments=adjustments,
-            )
-            updated_scenarios = list(scenarios)
-            replaced = False
-            for index, existing in enumerate(updated_scenarios):
-                if existing.uuid == scenario_uuid:
-                    updated_scenarios[index] = scenario_model
-                    replaced = True
-                    break
-            if not replaced:
-                updated_scenarios.append(scenario_model)
-            update_data("scenarios", updated_scenarios)
-            notify("Scenario saved.", level="success")
-            state["active_uuid"] = scenario_uuid
-            st.session_state["scenario_select"] = scenario_name
+    st.subheader("Scenario result")
+    coverage_result = _build_coverage_result(baseline_coverage, scenario_coverage)
+    styled_coverage = _style_coverage_result(coverage_result)
+    st.dataframe(styled_coverage, use_container_width=True)
 
 
 if __name__ == "__main__":
