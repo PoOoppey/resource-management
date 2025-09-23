@@ -11,6 +11,11 @@ from models import AdjustmentType, Scenario, ScenarioAdjustment
 from services.coverage import compute_theoretical_coverage
 from services.data_loader import get_data, update_data
 from services.scenario import apply_scenario
+from utils.relations import (
+    FOREIGN_KEY_RELATIONS,
+    build_reference_lookup,
+    enrich_payload,
+)
 from utils.styling import coverage_style
 
 
@@ -19,7 +24,6 @@ DIFF_COLUMN_LABEL = "Diff vs baseline"
 DISPLAY_DATASETS: List[Tuple[str, str]] = [
     ("employees", "Employees"),
     ("allocations", "Allocations"),
-    ("support_allocations", "Support allocations"),
     ("processes", "Processes"),
     ("coverage", "Required coverage"),
 ]
@@ -446,6 +450,29 @@ def _render_allocation_overview(
     elif stored_employee_uuid and stored_employee_uuid not in overview_df.index:
         st.session_state.pop(selected_employee_key, None)
 
+    employee_labels = {
+        uuid: str(overview_df.loc[uuid, "Employee"]) if "Employee" in overview_df.columns else uuid
+        for uuid in overview_df.index
+    }
+
+    if employee_labels:
+        options = list(employee_labels.keys())
+        default_uuid = st.session_state.get(selected_employee_key)
+        if selected_employee_uuid and selected_employee_uuid in options:
+            default_uuid = selected_employee_uuid
+        if default_uuid not in options:
+            default_uuid = options[0]
+            st.session_state[selected_employee_key] = default_uuid
+
+        default_index = options.index(default_uuid)
+        selected_employee_uuid = st.selectbox(
+            "Employee",
+            options,
+            index=default_index,
+            format_func=lambda value: employee_labels.get(value, value),
+            key=selected_employee_key,
+        )
+
     return selected_employee_uuid
 
 
@@ -454,9 +481,12 @@ def _render_allocation_tab(
     scenario: Scenario,
     baseline_df: pd.DataFrame,
     scenario_df: pd.DataFrame,
+    baseline_support_df: pd.DataFrame,
+    scenario_support_df: pd.DataFrame,
     baseline_data: Dict[str, Iterable],
     modified_data: Dict[str, Iterable],
     dataset: str,
+    support_dataset: str = "support_allocations",
 ) -> None:
     selected_employee_uuid = _render_allocation_overview(modified_data, scenario.uuid)
 
@@ -591,39 +621,22 @@ def _render_allocation_tab(
         combined = pd.concat([edited_subset, remaining], ignore_index=True, sort=False)
         combined = combined.reindex(columns=base_columns)
 
-        new_adjustments = _calculate_dataset_adjustments(dataset, baseline_df, combined)
+        new_adjustments = _calculate_dataset_adjustments(
+            dataset,
+            baseline_df,
+            combined,
+            baseline_data,
+            modified_data,
+        )
         _merge_adjustments(scenario, dataset, new_adjustments)
         update_data("scenarios", baseline_data["scenarios"])
         st.success("Scenario allocations saved.")
         st.experimental_rerun()
 
-
-def _render_support_tab(
-    *,
-    scenario: Scenario,
-    baseline_df: pd.DataFrame,
-    scenario_df: pd.DataFrame,
-    baseline_allocations: pd.DataFrame,
-    scenario_allocations: pd.DataFrame,
-    baseline_data: Dict[str, Iterable],
-    modified_data: Dict[str, Iterable],
-    dataset: str,
-) -> None:
-    selected_employee_uuid = _render_allocation_overview(modified_data, scenario.uuid)
-
     st.divider()
+    st.markdown("#### Support allocations")
 
-    if not selected_employee_uuid:
-        st.info("Select an employee in the table above to review support allocations.")
-        return
-
-    roles_df = _items_to_dataframe(modified_data.get("roles", []))
-    role_labels: Dict[str, str] = {}
-    if not roles_df.empty and {"uuid", "name"}.issubset(roles_df.columns):
-        role_labels = {
-            str(row["uuid"]): str(row.get("name", row["uuid"]))
-            for _, row in roles_df.iterrows()
-        }
+    role_labels = role_options
 
     processes_df = _items_to_dataframe(modified_data.get("processes", []))
     process_labels: Dict[str, str] = {}
@@ -641,8 +654,8 @@ def _render_support_tab(
             "uuid",
         ].fillna("").astype(str)
 
-    scenario_alloc_ids = set(_relevant_allocations(scenario_allocations))
-    baseline_alloc_ids = set(_relevant_allocations(baseline_allocations))
+    scenario_alloc_ids = set(_relevant_allocations(scenario_df.copy()))
+    baseline_alloc_ids = set(_relevant_allocations(baseline_df.copy()))
     relevant_alloc_ids = scenario_alloc_ids | baseline_alloc_ids
 
     if not relevant_alloc_ids:
@@ -654,29 +667,36 @@ def _render_support_tab(
             return pd.DataFrame(columns=df.columns)
         return df[df["allocation_uuid"].fillna("").astype(str).isin(relevant_alloc_ids)]
 
-    baseline_subset = _filter_support(baseline_df.copy())
-    scenario_subset = _filter_support(scenario_df.copy())
+    baseline_support_subset = _filter_support(baseline_support_df.copy())
+    scenario_support_subset = _filter_support(scenario_support_df.copy())
 
-    annotated_subset, removed_subset = _annotate_with_diff(baseline_subset, scenario_subset)
+    annotated_subset, removed_subset = _annotate_with_diff(
+        baseline_support_subset, scenario_support_subset
+    )
 
-    base_columns = list(dict.fromkeys(list(scenario_df.columns) + list(baseline_df.columns)))
-    if "uuid" not in base_columns:
-        base_columns.insert(0, "uuid")
-    if "allocation_uuid" not in base_columns:
-        base_columns.insert(0, "allocation_uuid")
-    column_order = list(dict.fromkeys(base_columns + [DIFF_COLUMN_LABEL]))
+    support_base_columns = list(
+        dict.fromkeys(list(scenario_support_df.columns) + list(baseline_support_df.columns))
+    )
+    if "uuid" not in support_base_columns:
+        support_base_columns.insert(0, "uuid")
+    if "allocation_uuid" not in support_base_columns:
+        support_base_columns.insert(0, "allocation_uuid")
+    support_column_order = list(
+        dict.fromkeys(support_base_columns + [DIFF_COLUMN_LABEL])
+    )
 
     if annotated_subset.empty:
-        display_df = pd.DataFrame(columns=column_order)
+        support_display_df = pd.DataFrame(columns=support_column_order)
     else:
-        display_df = annotated_subset.reindex(columns=column_order)
+        support_display_df = annotated_subset.reindex(columns=support_column_order)
 
     allocation_options: Dict[str, str] = {}
-    if not scenario_allocations.empty and "uuid" in scenario_allocations.columns:
-        scenario_allocations = scenario_allocations.assign(
-            uuid=scenario_allocations["uuid"].fillna("").astype(str)
+    scenario_allocations_df = scenario_df.copy()
+    if not scenario_allocations_df.empty and "uuid" in scenario_allocations_df.columns:
+        scenario_allocations_df = scenario_allocations_df.assign(
+            uuid=scenario_allocations_df["uuid"].fillna("").astype(str)
         )
-        for _, allocation in scenario_allocations.iterrows():
+        for _, allocation in scenario_allocations_df.iterrows():
             allocation_uuid = allocation["uuid"]
             if allocation_uuid not in relevant_alloc_ids:
                 continue
@@ -685,11 +705,12 @@ def _render_support_tab(
             percentage = float(allocation.get("percentage", 0.0) or 0.0)
             allocation_options[allocation_uuid] = f"{role_name} ({percentage * 100:.0f}%)"
 
-    if not baseline_allocations.empty and "uuid" in baseline_allocations.columns:
-        baseline_allocations = baseline_allocations.assign(
-            uuid=baseline_allocations["uuid"].fillna("").astype(str)
+    baseline_allocations_df = baseline_df.copy()
+    if not baseline_allocations_df.empty and "uuid" in baseline_allocations_df.columns:
+        baseline_allocations_df = baseline_allocations_df.assign(
+            uuid=baseline_allocations_df["uuid"].fillna("").astype(str)
         )
-        for _, allocation in baseline_allocations.iterrows():
+        for _, allocation in baseline_allocations_df.iterrows():
             allocation_uuid = allocation["uuid"]
             if allocation_uuid not in relevant_alloc_ids:
                 continue
@@ -698,43 +719,43 @@ def _render_support_tab(
                 f"{allocation_uuid} (baseline)",
             )
 
-    column_config: Dict[str, Any] = {}
-    if "uuid" in display_df.columns:
-        column_config["uuid"] = st.column_config.TextColumn("UUID", disabled=True)
-    if "allocation_uuid" in display_df.columns:
-        column_config["allocation_uuid"] = st.column_config.SelectboxColumn(
+    support_column_config: Dict[str, Any] = {}
+    if "uuid" in support_display_df.columns:
+        support_column_config["uuid"] = st.column_config.TextColumn("UUID", disabled=True)
+    if "allocation_uuid" in support_display_df.columns:
+        support_column_config["allocation_uuid"] = st.column_config.SelectboxColumn(
             "Role allocation",
             options=list(allocation_options.keys()),
             format_func=lambda value: allocation_options.get(value, "—"),
         )
-    if "process_uuid" in display_df.columns:
-        column_config["process_uuid"] = st.column_config.SelectboxColumn(
+    if "process_uuid" in support_display_df.columns:
+        support_column_config["process_uuid"] = st.column_config.SelectboxColumn(
             "Process",
             options=list(process_labels.keys()),
             format_func=lambda value: process_labels.get(value, "—"),
         )
-    if "percentage" in display_df.columns:
-        column_config["percentage"] = st.column_config.NumberColumn(
+    if "percentage" in support_display_df.columns:
+        support_column_config["percentage"] = st.column_config.NumberColumn(
             "Allocation %",
             min_value=0.0,
             max_value=1.0,
             step=0.05,
             format="%.0f%%",
         )
-    if "weight" in display_df.columns:
-        column_config["weight"] = st.column_config.NumberColumn(
+    if "weight" in support_display_df.columns:
+        support_column_config["weight"] = st.column_config.NumberColumn(
             "Weight", min_value=0.0, step=0.1
         )
-    column_config[DIFF_COLUMN_LABEL] = st.column_config.TextColumn(
+    support_column_config[DIFF_COLUMN_LABEL] = st.column_config.TextColumn(
         DIFF_COLUMN_LABEL, disabled=True
     )
 
-    editor_df = st.data_editor(
-        display_df,
+    support_editor_df = st.data_editor(
+        support_display_df,
         num_rows="dynamic",
         use_container_width=True,
-        hide_index="uuid" in display_df.columns,
-        column_config=column_config or None,
+        hide_index="uuid" in support_display_df.columns,
+        column_config=support_column_config or None,
         key=f"scenario_support_editor_{scenario.uuid}_{selected_employee_uuid}",
     )
 
@@ -750,23 +771,29 @@ def _render_support_tab(
         "Save support allocation changes",
         key=f"save_support_{scenario.uuid}",
     ):
-        edited_subset = editor_df.copy()
+        edited_subset = support_editor_df.copy()
         if DIFF_COLUMN_LABEL in edited_subset.columns:
             edited_subset = edited_subset.drop(columns=[DIFF_COLUMN_LABEL])
 
-        remaining = scenario_df.copy()
+        remaining = scenario_support_df.copy()
         if not remaining.empty and "allocation_uuid" in remaining.columns:
             remaining = remaining[
                 ~remaining["allocation_uuid"].fillna("").astype(str).isin(relevant_alloc_ids)
             ]
         else:
-            remaining = pd.DataFrame(columns=scenario_df.columns)
+            remaining = pd.DataFrame(columns=scenario_support_df.columns)
 
         combined = pd.concat([edited_subset, remaining], ignore_index=True, sort=False)
-        combined = combined.reindex(columns=base_columns)
+        combined = combined.reindex(columns=support_base_columns)
 
-        new_adjustments = _calculate_dataset_adjustments(dataset, baseline_df, combined)
-        _merge_adjustments(scenario, dataset, new_adjustments)
+        new_adjustments = _calculate_dataset_adjustments(
+            support_dataset,
+            baseline_support_df,
+            combined,
+            baseline_data,
+            modified_data,
+        )
+        _merge_adjustments(scenario, support_dataset, new_adjustments)
         update_data("scenarios", baseline_data["scenarios"])
         st.success("Scenario support allocations saved.")
         st.experimental_rerun()
@@ -780,6 +807,7 @@ def _render_generic_dataset_tab(
     baseline_df: pd.DataFrame,
     scenario_df: pd.DataFrame,
     baseline_data: Dict[str, Iterable],
+    modified_data: Dict[str, Iterable],
     show_differences_only: bool,
 ) -> None:
     annotated_df, removed_df = _annotate_with_diff(baseline_df, scenario_df)
@@ -803,6 +831,14 @@ def _render_generic_dataset_tab(
         display_df = full_display_df.loc[diff_mask].copy()
     else:
         display_df = full_display_df.copy()
+
+    if show_differences_only and not removed_df.empty:
+        removed_display = removed_df.reindex(columns=column_order).copy()
+        removed_display[DIFF_COLUMN_LABEL] = "Removed"
+        display_df = pd.concat([display_df, removed_display], ignore_index=True, sort=False)
+
+    if not display_df.empty:
+        display_df = display_df.reindex(columns=column_order)
 
     column_config: Dict[str, Any] = {}
     if "uuid" in display_df.columns:
@@ -835,7 +871,13 @@ def _render_generic_dataset_tab(
         if DIFF_COLUMN_LABEL in edited_df.columns:
             edited_df = edited_df.drop(columns=[DIFF_COLUMN_LABEL])
 
-        new_adjustments = _calculate_dataset_adjustments(dataset, baseline_df, edited_df)
+        new_adjustments = _calculate_dataset_adjustments(
+            dataset,
+            baseline_df,
+            edited_df,
+            baseline_data,
+            modified_data,
+        )
         _merge_adjustments(scenario, dataset, new_adjustments)
         update_data("scenarios", baseline_data["scenarios"])
         st.success(f"Scenario adjustments for {label.lower()} saved.")
@@ -975,11 +1017,19 @@ def _calculate_dataset_adjustments(
     dataset: str,
     baseline_df: pd.DataFrame,
     edited_df: pd.DataFrame,
+    baseline_data: Dict[str, Iterable],
+    modified_data: Dict[str, Iterable],
 ) -> List[ScenarioAdjustment]:
     if dataset not in ADJUSTMENT_MAPPING:
         return []
 
     add_type, remove_type, update_type = ADJUSTMENT_MAPPING[dataset]
+
+    reference_lookup: Dict[str, Dict[str, Dict[str, Any]]] = {}
+    if dataset in FOREIGN_KEY_RELATIONS:
+        reference_lookup = build_reference_lookup(
+            baseline_data=baseline_data, modified_data=modified_data
+        )
 
     baseline_records = _prepare_records(baseline_df)
     edited_df = edited_df.copy()
@@ -1004,6 +1054,7 @@ def _calculate_dataset_adjustments(
     for identifier in added_ids:
         payload = {key: value for key, value in edited_records[identifier].items() if key != "uuid"}
         payload["uuid"] = identifier
+        payload = enrich_payload(dataset, payload, reference_lookup)
         adjustments.append(
             ScenarioAdjustment(uuid=_generate_uuid("adj"), type=add_type, payload=payload)
         )
@@ -1033,6 +1084,7 @@ def _calculate_dataset_adjustments(
 
         payload = {key: value for key, value in edited_record.items() if key != "uuid"}
         payload["uuid"] = identifier
+        payload = enrich_payload(dataset, payload, reference_lookup)
         adjustments.append(
             ScenarioAdjustment(uuid=_generate_uuid("adj"), type=update_type, payload=payload)
         )
@@ -1108,25 +1160,18 @@ def main():
             scenario_df = _items_to_dataframe(modified_data.get(dataset, [])).copy()
 
             if dataset == "allocations":
+                baseline_support_df = _items_to_dataframe(
+                    data.get("support_allocations", [])
+                ).copy()
+                scenario_support_df = _items_to_dataframe(
+                    modified_data.get("support_allocations", [])
+                ).copy()
                 _render_allocation_tab(
                     scenario=scenario,
                     baseline_df=baseline_df,
                     scenario_df=scenario_df,
-                    baseline_data=data,
-                    modified_data=modified_data,
-                    dataset=dataset,
-                )
-            elif dataset == "support_allocations":
-                baseline_allocations = _items_to_dataframe(data.get("allocations", [])).copy()
-                scenario_allocations = _items_to_dataframe(
-                    modified_data.get("allocations", [])
-                ).copy()
-                _render_support_tab(
-                    scenario=scenario,
-                    baseline_df=baseline_df,
-                    scenario_df=scenario_df,
-                    baseline_allocations=baseline_allocations,
-                    scenario_allocations=scenario_allocations,
+                    baseline_support_df=baseline_support_df,
+                    scenario_support_df=scenario_support_df,
                     baseline_data=data,
                     modified_data=modified_data,
                     dataset=dataset,
@@ -1139,6 +1184,7 @@ def main():
                     baseline_df=baseline_df,
                     scenario_df=scenario_df,
                     baseline_data=data,
+                    modified_data=modified_data,
                     show_differences_only=show_differences_only,
                 )
 
