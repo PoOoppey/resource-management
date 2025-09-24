@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections import defaultdict
 from dataclasses import asdict, is_dataclass
 from datetime import date, datetime
-from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import pandas as pd
 import streamlit as st
@@ -535,6 +535,37 @@ def render_allocations(
             st.session_state.pop("selected_employee_uuid", None)
     elif stored_employee_uuid:
         st.session_state.pop("selected_employee_uuid", None)
+
+    if overview_df is not None and not overview_df.empty():
+        selection_labels: List[Tuple[str, str]] = []
+        seen_labels: set[str] = set()
+        for identifier in overview_df.index:
+            raw_label = overview_df.loc[identifier, "Employee"]
+            base_label = (
+                raw_label.strip()
+                if isinstance(raw_label, str) and raw_label.strip()
+                else str(identifier)
+            )
+            label = base_label
+            if label in seen_labels:
+                label = f"{base_label} ({identifier})"
+            seen_labels.add(label)
+            selection_labels.append((label, identifier))
+
+        if selection_labels:
+            label_to_identifier = dict(selection_labels)
+            label_order = [label for label, _ in selection_labels]
+            default_index = 0
+            if selected_employee_uuid:
+                for index, (_, identifier) in enumerate(selection_labels):
+                    if identifier == selected_employee_uuid:
+                        default_index = index
+                        break
+            selected_label = st.selectbox(
+                "Employee", label_order, index=default_index, key="allocation_overview_employee"
+            )
+            selected_employee_uuid = label_to_identifier[selected_label]
+            st.session_state["selected_employee_uuid"] = selected_employee_uuid
 
     st.divider()
 
