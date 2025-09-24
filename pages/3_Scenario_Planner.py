@@ -7,7 +7,7 @@ from uuid import uuid4
 import pandas as pd
 import streamlit as st
 
-from models import AdjustmentType, Scenario, ScenarioAdjustment
+from models import AdjustmentType, RoleType, Scenario, ScenarioAdjustment
 from services.coverage import compute_theoretical_coverage
 from services.data_loader import get_data, update_data
 from services.scenario import apply_scenario
@@ -31,6 +31,14 @@ DISPLAY_DATASETS: List[Tuple[str, str]] = [
 ]
 
 NUMERIC_PRECISION = 2
+
+
+REQUIRED_COLUMN_STYLE = {
+    "background-color": "#ede9fe",
+    "font-style": "italic",
+    "color": "#111827",
+    "font-weight": "600",
+}
 
 
 ADJUSTMENT_MAPPING: Dict[str, Tuple[AdjustmentType, AdjustmentType, AdjustmentType]] = {
@@ -175,6 +183,22 @@ def _build_role_labels(
     return labels
 
 
+def _build_app_labels(
+    baseline_data: Dict[str, Iterable], modified_data: Dict[str, Iterable]
+) -> Dict[str, str]:
+    apps_df = _combined_dataset_frame("apps", baseline_data, modified_data)
+    labels: Dict[str, str] = {}
+    if apps_df.empty or "uuid" not in apps_df.columns:
+        return labels
+    for _, row in apps_df.iterrows():
+        identifier = _stringify_nullable(row.get("uuid"))
+        if not identifier:
+            continue
+        name = _stringify_nullable(row.get("name"))
+        labels[identifier] = name or identifier
+    return labels
+
+
 def _build_process_labels(
     baseline_data: Dict[str, Iterable], modified_data: Dict[str, Iterable]
 ) -> Dict[str, str]:
@@ -256,6 +280,7 @@ def _build_label_maps(
     office_labels = _build_office_labels(baseline_data, modified_data)
     role_labels = _build_role_labels(baseline_data, modified_data)
     process_labels = _build_process_labels(baseline_data, modified_data)
+    app_labels = _build_app_labels(baseline_data, modified_data)
     employee_labels = _build_employee_labels(
         baseline_data, modified_data, office_labels
     )
@@ -263,6 +288,7 @@ def _build_label_maps(
         baseline_data, modified_data, employee_labels, role_labels
     )
     return {
+        "apps": app_labels,
         "offices": office_labels,
         "roles": role_labels,
         "processes": process_labels,
@@ -290,6 +316,25 @@ def _make_selectbox_column(
         return options.get(value, value)
 
     return st.column_config.SelectboxColumn(
+        label,
+        options=ordered_options,
+        format_func=_format,
+    )
+
+
+def _make_multiselect_column(
+    label: str, options: Dict[str, str]
+) -> st.column_config.MultiselectColumn:
+    ordered_options = [value for value in options.keys() if value]
+
+    def _format(values: Any) -> str:
+        if not values:
+            return "—"
+        if isinstance(values, str):
+            values = [values]
+        return ", ".join(options.get(value, value) for value in values)
+
+    return st.column_config.MultiselectColumn(
         label,
         options=ordered_options,
         format_func=_format,
@@ -365,9 +410,15 @@ def _summarize_differences(
         base_value = baseline_record.get(column)
         scenario_value = scenario_record.get(column)
         if _normalize_value(base_value) != _normalize_value(scenario_value):
-            differences.append(
-                f"{column}: {_format_value(base_value)} -> {_format_value(scenario_value)}"
-            )
+            if column == "percentage":
+                base_formatted = _format_percentage_value(base_value)
+                scenario_formatted = _format_percentage_value(scenario_value)
+                label = "Allocation"
+            else:
+                base_formatted = _format_value(base_value)
+                scenario_formatted = _format_value(scenario_value)
+                label = column.replace("_", " ").title()
+            differences.append(f"{label}: {base_formatted} -> {scenario_formatted}")
 
     if not differences:
         return "Unchanged"
@@ -486,6 +537,16 @@ def _format_allocation_percentage(value: float | None) -> str:
     return f"{numeric * 100:.0f}%"
 
 
+def _format_percentage_value(value: float | None) -> str:
+    if value is None or pd.isna(value):
+        return "—"
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return "—"
+    return f"{numeric * 100:.0f}%"
+
+
 def _summarize_role_assignments(
     rows: pd.DataFrame, role_labels: Dict[str, str]
 ) -> str:
@@ -508,15 +569,74 @@ def _summarize_role_assignments(
     return "; ".join(assignments) if assignments else "—"
 
 
+def _summarize_support_assignments(
+    rows: pd.DataFrame,
+    *,
+    process_labels: Dict[str, str],
+    allocation_lookup: Dict[str, Dict[str, Any]],
+    role_labels: Dict[str, str],
+) -> str:
+    if rows is None or rows.empty:
+        return "—"
+
+    summaries: List[str] = []
+    for _, row in rows.iterrows():
+        allocation_uuid = _stringify_nullable(row.get("allocation_uuid"))
+        allocation_info = allocation_lookup.get(allocation_uuid, {})
+        role_uuid = _stringify_nullable(allocation_info.get("role_uuid"))
+        role_label = role_labels.get(role_uuid, role_uuid or "—")
+        process_uuid = _stringify_nullable(row.get("process_uuid"))
+        process_label = process_labels.get(process_uuid, process_uuid or "—")
+
+        if role_label and process_label:
+            base_label = f"{role_label} → {process_label}"
+        else:
+            base_label = role_label or process_label or allocation_uuid or "—"
+
+        metrics: List[str] = []
+        percentage = row.get("percentage")
+        if not _is_missing(percentage):
+            try:
+                metrics.append(f"{float(percentage) * 100:.0f}%")
+            except (TypeError, ValueError):
+                pass
+
+        allocation_weight = allocation_info.get("weight")
+        support_weight = row.get("weight")
+        effective_weight = (
+            support_weight
+            if not _is_missing(support_weight)
+            else allocation_weight
+        )
+        if not _is_missing(effective_weight):
+            try:
+                metrics.append(f"×{float(effective_weight):.1f}")
+            except (TypeError, ValueError):
+                pass
+
+        if metrics:
+            summaries.append(f"{base_label} ({' '.join(metrics)})")
+        else:
+            summaries.append(base_label)
+
+    return "; ".join(summaries) if summaries else "—"
+
+
 def _summarize_employee_allocations(
     baseline_df: pd.DataFrame,
     scenario_df: pd.DataFrame,
+    baseline_support_df: pd.DataFrame,
+    scenario_support_df: pd.DataFrame,
     employee_labels: Dict[str, str],
     role_labels: Dict[str, str],
+    process_labels: Dict[str, str],
     show_differences_only: bool,
+    support_role_ids: set[str] | None,
 ) -> pd.DataFrame:
     baseline = baseline_df.copy()
     scenario = scenario_df.copy()
+    baseline_support = baseline_support_df.copy()
+    scenario_support = scenario_support_df.copy()
 
     for df in (baseline, scenario):
         if df.empty:
@@ -525,24 +645,87 @@ def _summarize_employee_allocations(
             df["employee_uuid"] = df["employee_uuid"].apply(_stringify_nullable)
         if "role_uuid" in df.columns:
             df["role_uuid"] = df["role_uuid"].apply(_stringify_nullable)
+        if "uuid" in df.columns:
+            df["uuid"] = df["uuid"].apply(_stringify_nullable)
         if "percentage" in df.columns:
             df["percentage"] = pd.to_numeric(df["percentage"], errors="coerce")
 
+    for df in (baseline_support, scenario_support):
+        if df.empty:
+            continue
+        for column in ["uuid", "allocation_uuid", "process_uuid"]:
+            if column in df.columns:
+                df[column] = df[column].apply(_stringify_nullable)
+        if "percentage" in df.columns:
+            df["percentage"] = pd.to_numeric(df["percentage"], errors="coerce")
+        if "weight" in df.columns:
+            df["weight"] = pd.to_numeric(df["weight"], errors="coerce")
+
+    baseline_lookup: Dict[str, Dict[str, Any]] = {}
+    scenario_lookup: Dict[str, Dict[str, Any]] = {}
+    if not baseline.empty and "uuid" in baseline.columns:
+        for _, row in baseline.iterrows():
+            identifier = _stringify_nullable(row.get("uuid"))
+            if identifier and identifier not in baseline_lookup:
+                baseline_lookup[identifier] = row.to_dict()
+    if not scenario.empty and "uuid" in scenario.columns:
+        for _, row in scenario.iterrows():
+            identifier = _stringify_nullable(row.get("uuid"))
+            if identifier and identifier not in scenario_lookup:
+                scenario_lookup[identifier] = row.to_dict()
+
+    support_role_ids = {value for value in (support_role_ids or set()) if value}
+
     employee_ids: set[str] = set()
-    if not baseline.empty and "employee_uuid" in baseline.columns:
+    for source_df in (baseline, scenario):
+        if source_df.empty or "employee_uuid" not in source_df.columns:
+            continue
         employee_ids.update(
-            value for value in baseline["employee_uuid"].dropna().astype(str) if value
-        )
-    if not scenario.empty and "employee_uuid" in scenario.columns:
-        employee_ids.update(
-            value for value in scenario["employee_uuid"].dropna().astype(str) if value
+            value for value in source_df["employee_uuid"].dropna().astype(str) if value
         )
 
-    summary_rows: List[Dict[str, str]] = []
+    allocation_employee_lookup: Dict[str, str] = {}
+    for lookup in (baseline_lookup, scenario_lookup):
+        for allocation_id, record in lookup.items():
+            employee_id = _stringify_nullable(record.get("employee_uuid"))
+            if allocation_id and employee_id:
+                allocation_employee_lookup[allocation_id] = employee_id
+
+    for support_df in (baseline_support, scenario_support):
+        if support_df.empty or "allocation_uuid" not in support_df.columns:
+            continue
+        for allocation_id in support_df["allocation_uuid"].dropna():
+            identifier = _stringify_nullable(allocation_id)
+            employee_id = allocation_employee_lookup.get(identifier)
+            if employee_id:
+                employee_ids.add(employee_id)
+
+    summary_rows: List[Dict[str, Any]] = []
+
+    def _collect_allocation_ids(
+        rows: pd.DataFrame, *, support_only: bool
+    ) -> set[str]:
+        if rows.empty or "uuid" not in rows.columns:
+            return set()
+        subset = rows
+        if support_only and support_role_ids and "role_uuid" in rows.columns:
+            subset = rows[rows["role_uuid"].isin(support_role_ids)]
+        return {
+            _stringify_nullable(value)
+            for value in subset["uuid"].dropna().astype(str)
+            if _stringify_nullable(value)
+        }
+
+    def _describe_change(label: str, before: str, after: str) -> str:
+        before_display = before if before and before != "—" else "—"
+        after_display = after if after and after != "—" else "—"
+        return f"{label}: {before_display} → {after_display}"
 
     for employee_id in sorted(
         employee_ids, key=lambda identifier: employee_labels.get(identifier, identifier).lower()
     ):
+        employee_label = employee_labels.get(employee_id, employee_id)
+
         if "employee_uuid" in baseline.columns:
             baseline_rows = baseline[baseline["employee_uuid"] == employee_id]
         else:
@@ -552,18 +735,6 @@ def _summarize_employee_allocations(
         else:
             scenario_rows = pd.DataFrame(columns=scenario.columns)
 
-        baseline_subset = baseline_df.copy()
-        if "employee_uuid" in baseline_subset.columns:
-            baseline_subset = baseline_subset[
-                baseline_subset["employee_uuid"].apply(_stringify_nullable) == employee_id
-            ]
-        scenario_subset = scenario_df.copy()
-        if "employee_uuid" in scenario_subset.columns:
-            scenario_subset = scenario_subset[
-                scenario_subset["employee_uuid"].apply(_stringify_nullable) == employee_id
-            ]
-
-        employee_label = employee_labels.get(employee_id, employee_id)
         baseline_total = (
             float(baseline_rows["percentage"].sum()) if not baseline_rows.empty else None
         )
@@ -571,35 +742,63 @@ def _summarize_employee_allocations(
             float(scenario_rows["percentage"].sum()) if not scenario_rows.empty else None
         )
 
-        annotated_df, removed_df = _annotate_with_diff(baseline_subset, scenario_subset)
+        baseline_support_ids = _collect_allocation_ids(
+            baseline_rows, support_only=True
+        )
+        scenario_support_ids = _collect_allocation_ids(
+            scenario_rows, support_only=True
+        )
 
-        change_notes: List[str] = []
-        if not annotated_df.empty and DIFF_COLUMN_LABEL in annotated_df.columns:
-            for diff_text in annotated_df[DIFF_COLUMN_LABEL]:
-                note = _stringify_nullable(diff_text)
-                if note and note != "Unchanged":
-                    change_notes.append(note)
-
-        if not removed_df.empty:
-            removed_roles = _summarize_role_assignments(removed_df, role_labels)
-            if removed_roles != "—":
-                change_notes.append(f"Removed: {removed_roles}")
-            else:
-                change_notes.append("Removed allocations")
-
-        if baseline_rows.empty and not scenario_rows.empty:
-            added_roles = _summarize_role_assignments(scenario_rows, role_labels)
-            if added_roles != "—":
-                change_notes.append(f"Added: {added_roles}")
+        if baseline_support.empty:
+            baseline_support_rows = pd.DataFrame(columns=baseline_support.columns)
+        else:
+            baseline_support_rows = baseline_support[
+                baseline_support["allocation_uuid"].isin(baseline_support_ids)
+            ]
+        if scenario_support.empty:
+            scenario_support_rows = pd.DataFrame(columns=scenario_support.columns)
+        else:
+            scenario_support_rows = scenario_support[
+                scenario_support["allocation_uuid"].isin(scenario_support_ids)
+            ]
 
         baseline_roles = _summarize_role_assignments(baseline_rows, role_labels)
         scenario_roles = _summarize_role_assignments(scenario_rows, role_labels)
+        baseline_support_summary = _summarize_support_assignments(
+            baseline_support_rows,
+            process_labels=process_labels,
+            allocation_lookup=baseline_lookup,
+            role_labels=role_labels,
+        )
+        scenario_support_summary = _summarize_support_assignments(
+            scenario_support_rows,
+            process_labels=process_labels,
+            allocation_lookup={**baseline_lookup, **scenario_lookup},
+            role_labels=role_labels,
+        )
 
-        if baseline_rows.empty and not scenario_rows.empty:
+        roles_changed = baseline_roles != scenario_roles
+        support_changed = baseline_support_summary != scenario_support_summary
+        utilisation_changed = False
+        if baseline_total is None and scenario_total is not None:
+            utilisation_changed = True
+        elif baseline_total is not None and scenario_total is None:
+            utilisation_changed = True
+        elif baseline_total is not None and scenario_total is not None:
+            utilisation_changed = abs(baseline_total - scenario_total) > 1e-6
+
+        has_baseline_data = (
+            (not baseline_rows.empty) or (not baseline_support_rows.empty)
+        )
+        has_scenario_data = (
+            (not scenario_rows.empty) or (not scenario_support_rows.empty)
+        )
+
+        if not has_baseline_data and has_scenario_data:
             status = "Added"
-        elif scenario_rows.empty and not baseline_rows.empty:
+        elif has_baseline_data and not has_scenario_data:
             status = "Removed"
-        elif change_notes:
+        elif roles_changed or support_changed or utilisation_changed:
             status = "Updated"
         else:
             status = "Unchanged"
@@ -607,27 +806,54 @@ def _summarize_employee_allocations(
         if show_differences_only and status == "Unchanged":
             continue
 
+        details_parts: List[str] = []
+        if roles_changed or status in {"Added", "Removed"}:
+            details_parts.append(
+                _describe_change("Roles", baseline_roles, scenario_roles)
+            )
+        if (support_changed or status in {"Added", "Removed"}) and (
+            baseline_support_summary != "—" or scenario_support_summary != "—"
+        ):
+            details_parts.append(
+                _describe_change(
+                    "Support", baseline_support_summary, scenario_support_summary
+                )
+            )
+        if utilisation_changed:
+            details_parts.append(
+                _describe_change(
+                    "Utilisation",
+                    _format_allocation_percentage(baseline_total),
+                    _format_allocation_percentage(scenario_total),
+                )
+            )
+
         summary_rows.append(
             {
                 "Employee": employee_label or employee_id or "—",
                 "Baseline allocations": baseline_roles,
-                "Baseline utilisation": _format_allocation_percentage(baseline_total),
+                "Baseline support allocations": baseline_support_summary,
+                "Baseline utilisation": baseline_total,
                 "Scenario allocations": scenario_roles,
-                "Scenario utilisation": _format_allocation_percentage(scenario_total),
+                "Scenario support allocations": scenario_support_summary,
+                "Scenario utilisation": scenario_total,
                 "Status": status,
-                "Details": "; ".join(dict.fromkeys(change_notes)) if change_notes else "—",
+                "Details": "; ".join(details_parts) if details_parts else "—",
             }
         )
 
     columns = [
         "Employee",
         "Baseline allocations",
+        "Baseline support allocations",
         "Baseline utilisation",
         "Scenario allocations",
+        "Scenario support allocations",
         "Scenario utilisation",
         "Status",
         "Details",
     ]
+
     if not summary_rows:
         return pd.DataFrame(columns=columns)
 
@@ -652,6 +878,25 @@ def _render_allocation_tab(
     role_labels = label_maps.get("roles", {})
     process_labels = label_maps.get("processes", {})
     allocation_labels = label_maps.get("allocations", {})
+
+    roles_frame = _combined_dataset_frame("roles", baseline_data, modified_data)
+    support_role_ids: set[str] = set()
+    if not roles_frame.empty and "uuid" in roles_frame.columns:
+        roles_frame["uuid"] = roles_frame["uuid"].apply(_stringify_nullable)
+        for _, role_row in roles_frame.iterrows():
+            identifier = _stringify_nullable(role_row.get("uuid"))
+            raw_type = role_row.get("type")
+            if hasattr(raw_type, "value"):
+                type_value = str(raw_type.value)
+            elif isinstance(raw_type, str):
+                type_value = raw_type
+            else:
+                type_value = str(raw_type) if raw_type is not None else ""
+            normalized_type = type_value.upper()
+            if "." in normalized_type:
+                normalized_type = normalized_type.split(".")[-1]
+            if identifier and normalized_type == RoleType.SUPPORT.value:
+                support_role_ids.add(identifier)
 
     st.markdown("#### Role allocations overview")
 
@@ -684,9 +929,13 @@ def _render_allocation_tab(
     summary_table = _summarize_employee_allocations(
         baseline_df,
         scenario_df,
+        baseline_support_df,
+        scenario_support_df,
         employee_labels,
         role_labels,
+        process_labels,
         show_differences_only,
+        support_role_ids,
     )
 
     if summary_table.empty:
@@ -696,6 +945,14 @@ def _render_allocation_tab(
             summary_table,
             use_container_width=True,
             hide_index=True,
+            column_config={
+                "Baseline utilisation": st.column_config.ProgressColumn(
+                    "Baseline utilisation", min_value=0.0, max_value=1.0, format="{:.0%}"
+                ),
+                "Scenario utilisation": st.column_config.ProgressColumn(
+                    "Scenario utilisation", min_value=0.0, max_value=1.0, format="{:.0%}"
+                ),
+            },
         )
 
     available_employee_ids: set[str] = set()
@@ -704,6 +961,13 @@ def _render_allocation_tab(
             continue
         ids = df["employee_uuid"].apply(_stringify_nullable)
         available_employee_ids.update(value for value in ids if value)
+
+    employees_frame = _combined_dataset_frame("employees", baseline_data, modified_data)
+    if not employees_frame.empty and "uuid" in employees_frame.columns:
+        employees_frame["uuid"] = employees_frame["uuid"].apply(_stringify_nullable)
+        available_employee_ids.update(
+            value for value in employees_frame["uuid"] if value
+        )
 
     if not available_employee_ids:
         st.info("No role allocations available to edit.")
@@ -734,6 +998,8 @@ def _render_allocation_tab(
             df["employee_uuid"] = df["employee_uuid"].apply(_stringify_nullable)
         if "uuid" in df.columns:
             df["uuid"] = df["uuid"].apply(_stringify_nullable)
+        if "role_uuid" in df.columns:
+            df["role_uuid"] = df["role_uuid"].apply(_stringify_nullable)
 
     employee_allocations = scenario_allocations.copy()
     if "employee_uuid" in employee_allocations.columns:
@@ -744,6 +1010,12 @@ def _render_allocation_tab(
         employee_allocations = pd.DataFrame(columns=base_columns)
     else:
         employee_allocations = employee_allocations.reindex(columns=base_columns)
+
+    allocation_display_df = employee_allocations.copy()
+    if "percentage" in allocation_display_df.columns:
+        allocation_display_df["percentage"] = allocation_display_df["percentage"].apply(
+            lambda value: None if _is_missing(value) else float(value) * 100
+        )
 
     allocation_column_config: Dict[str, Any] = {}
     if "uuid" in employee_allocations.columns:
@@ -763,8 +1035,8 @@ def _render_allocation_tab(
         allocation_column_config["percentage"] = st.column_config.NumberColumn(
             "Allocation %",
             min_value=0.0,
-            max_value=1.0,
-            step=0.05,
+            max_value=100.0,
+            step=5.0,
             format="%.0f%%",
         )
     if "weight" in employee_allocations.columns:
@@ -774,10 +1046,10 @@ def _render_allocation_tab(
 
     st.markdown("##### Allocation details")
     allocation_editor_df = st.data_editor(
-        employee_allocations,
+        allocation_display_df,
         num_rows="dynamic",
         use_container_width=True,
-        hide_index="uuid" in employee_allocations.columns,
+        hide_index=True,
         column_config=allocation_column_config or None,
         key=f"scenario_allocations_editor_{scenario.uuid}_{selected_employee}",
     )
@@ -813,6 +1085,10 @@ def _render_allocation_tab(
 
     if st.button("Save allocation changes", key=f"save_allocations_{scenario.uuid}"):
         edited_df = allocation_editor_df.copy().reindex(columns=base_columns)
+        if "percentage" in edited_df.columns:
+            edited_df["percentage"] = edited_df["percentage"].apply(
+                lambda value: None if _is_missing(value) else float(value) / 100
+            )
         if "employee_uuid" in edited_df.columns:
             edited_df["employee_uuid"] = edited_df["employee_uuid"].apply(
                 lambda value: selected_employee
@@ -865,17 +1141,20 @@ def _render_allocation_tab(
                 df[column] = df[column].apply(_stringify_nullable)
 
     relevant_allocation_ids: set[str] = set()
+    support_filter = support_role_ids if support_role_ids else None
     if {"uuid", "employee_uuid"}.issubset(scenario_allocations.columns):
+        scenario_mask = scenario_allocations["employee_uuid"] == selected_employee
+        if support_filter and "role_uuid" in scenario_allocations.columns:
+            scenario_mask &= scenario_allocations["role_uuid"].isin(support_role_ids)
         relevant_allocation_ids.update(
-            scenario_allocations.loc[
-                scenario_allocations["employee_uuid"] == selected_employee, "uuid"
-            ].dropna().astype(str)
+            scenario_allocations.loc[scenario_mask, "uuid"].dropna().astype(str)
         )
     if {"uuid", "employee_uuid"}.issubset(baseline_allocations.columns):
+        baseline_mask = baseline_allocations["employee_uuid"] == selected_employee
+        if support_filter and "role_uuid" in baseline_allocations.columns:
+            baseline_mask &= baseline_allocations["role_uuid"].isin(support_role_ids)
         relevant_allocation_ids.update(
-            baseline_allocations.loc[
-                baseline_allocations["employee_uuid"] == selected_employee, "uuid"
-            ].dropna().astype(str)
+            baseline_allocations.loc[baseline_mask, "uuid"].dropna().astype(str)
         )
     relevant_allocation_ids = {identifier for identifier in relevant_allocation_ids if identifier}
 
@@ -910,10 +1189,18 @@ def _render_allocation_tab(
         support_display_df = pd.DataFrame(columns=list(support_base_columns) + ["Status"])
     else:
         support_display_df["Status"] = "Active"
+    if "percentage" in support_display_df.columns:
+        support_display_df["percentage"] = support_display_df["percentage"].apply(
+            lambda value: None if _is_missing(value) else float(value) * 100
+        )
 
     if not support_removed_df.empty:
         removed_display = support_removed_df.reindex(columns=support_base_columns).copy()
         removed_display["Status"] = "Removed"
+        if "percentage" in removed_display.columns:
+            removed_display["percentage"] = removed_display["percentage"].apply(
+                lambda value: None if _is_missing(value) else float(value) * 100
+            )
         support_display_df = pd.concat(
             [support_display_df, removed_display], ignore_index=True, sort=False
         )
@@ -929,7 +1216,7 @@ def _render_allocation_tab(
         )
     if "allocation_uuid" in scenario_support_filtered.columns:
         support_column_config["allocation_uuid"] = _make_selectbox_column(
-            "Role allocation", allocation_option_map or allocation_labels
+            "Role allocation", allocation_option_map
         )
     if "process_uuid" in scenario_support_filtered.columns:
         support_column_config["process_uuid"] = _make_selectbox_column(
@@ -939,8 +1226,8 @@ def _render_allocation_tab(
         support_column_config["percentage"] = st.column_config.NumberColumn(
             "Allocation %",
             min_value=0.0,
-            max_value=1.0,
-            step=0.05,
+            max_value=100.0,
+            step=5.0,
             format="%.0f%%",
         )
     if "weight" in scenario_support_filtered.columns:
@@ -970,6 +1257,10 @@ def _render_allocation_tab(
                 edited_support_df = edited_support_df.loc[~removed_mask].copy()
             edited_support_df = edited_support_df.drop(columns=["Status"])
         edited_support_df = edited_support_df.reindex(columns=support_base_columns)
+        if "percentage" in edited_support_df.columns:
+            edited_support_df["percentage"] = edited_support_df["percentage"].apply(
+                lambda value: None if _is_missing(value) else float(value) / 100
+            )
         for column in ["allocation_uuid", "process_uuid"]:
             if column in edited_support_df.columns:
                 edited_support_df[column] = edited_support_df[column].apply(
@@ -1075,6 +1366,17 @@ def _render_generic_dataset_tab(
                 column_config[field] = _make_selectbox_column(label_text, options)
             else:
                 column_config.setdefault(field, st.column_config.TextColumn(label_text))
+    if dataset == "processes":
+        app_options = label_maps.get("apps", {})
+        process_options = label_maps.get("processes", {})
+        if "apps_related" in display_df.columns:
+            column_config["apps_related"] = _make_multiselect_column(
+                "Apps", app_options
+            )
+        if "process_related" in display_df.columns:
+            column_config["process_related"] = _make_multiselect_column(
+                "Related processes", process_options
+            )
     column_config[DIFF_COLUMN_LABEL] = st.column_config.TextColumn(
         DIFF_COLUMN_LABEL, disabled=True
     )
@@ -1228,7 +1530,10 @@ def _style_coverage_result(df: pd.DataFrame) -> pd.io.formats.style.Styler | pd.
         if "Coverage" in df.columns:
             styles["Coverage"] = coverage_style(required_value, coverage_value)
         if "Required" in df.columns:
-            styles.setdefault("Required", "font-weight: 600")
+            required_style = "; ".join(
+                f"{prop}: {value}" for prop, value in REQUIRED_COLUMN_STYLE.items()
+            )
+            styles["Required"] = required_style
         return pd.Series(styles)
 
     styler = styler.apply(_style_row, axis=1)
