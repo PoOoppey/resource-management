@@ -35,18 +35,18 @@ def coverage_color(required, value):
     if required == 0:
         if value == 0:
             return None
-        return "#bae6fd", "#0c4a6e"
+        return "#dbeafe", "#1e3a8a"
 
     gap_ratio = (value - required) / required
     if gap_ratio <= -0.15:
-        return "#f87171", "#7f1d1d"
+        return "#fee2e2", "#7f1d1d"
     if gap_ratio < 0:
-        return "#fecaca", "#7f1d1d"
+        return "#ffe4e6", "#7f1d1d"
     if gap_ratio < 0.1:
-        return "#fef08a", "#854d0e"
+        return "#fef9c3", "#854d0e"
     if gap_ratio < 0.25:
-        return "#bbf7d0", "#166534"
-    return "#86efac", "#14532d"
+        return "#dcfce7", "#166534"
+    return "#bbf7d0", "#166534"
 
 
 def coverage_style(required, value, *, emphasize: bool = True) -> str:
