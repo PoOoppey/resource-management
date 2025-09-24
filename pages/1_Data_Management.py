@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import asdict, is_dataclass
+from datetime import date, datetime
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence
 
 import pandas as pd
@@ -12,6 +13,7 @@ from models import (
     App,
     Criticality,
     Employee,
+    EmployeeExpertise,
     Office,
     Process,
     Region,
@@ -31,6 +33,8 @@ from uuid import uuid4
 def _serialize_value(value: Any):
     if hasattr(value, "value"):
         return value.value
+    if isinstance(value, (date, datetime)):
+        return value.isoformat()
     if isinstance(value, list):
         return value
     return value
@@ -128,10 +132,13 @@ def _smart_editor(
     key: Optional[str] = None,
     entity_label: Optional[str] = None,
     on_save: Optional[Callable[[List], None]] = None,
+    date_columns: Optional[Sequence[str]] = None,
 ):
     field_order = list(model_cls.__dataclass_fields__.keys())
     df = _editable_dataframe(items)
     df = _ensure_dataframe(df, field_order)
+
+    date_columns = list(date_columns or [])
 
     if list_columns:
         for column in list_columns:
@@ -141,6 +148,11 @@ def _smart_editor(
                 df[column] = df[column].apply(
                     lambda value: ", ".join(value) if isinstance(value, list) else (value or "")
                 )
+
+    if date_columns:
+        for column in date_columns:
+            if column in df.columns:
+                df[column] = pd.to_datetime(df[column], errors="coerce").dt.date
 
     column_config: Dict[str, Any] = {}
     column_order: List[str] = []
@@ -184,6 +196,8 @@ def _smart_editor(
                 options=options,
                 format_func=_make_formatter(select_options[column]),
             )
+        elif date_columns and column in date_columns:
+            column_config[column] = st.column_config.DateColumn(label, format="YYYY-MM-DD")
         elif number_columns and column in number_columns:
             number_config = number_columns[column]
             column_config[column] = st.column_config.NumberColumn(label, **number_config)
@@ -227,6 +241,23 @@ def _smart_editor(
         for column, value in list(record.items()):
             if isinstance(value, list):
                 record[column] = value
+                continue
+            if date_columns and column in date_columns:
+                if value in ("", None):
+                    record[column] = None
+                    continue
+                if isinstance(value, pd.Timestamp):
+                    value = value.to_pydatetime().date()
+                if isinstance(value, datetime):
+                    value = value.date()
+                if isinstance(value, date):
+                    record[column] = value.isoformat()
+                    continue
+                parsed = pd.to_datetime(value, errors="coerce")
+                if pd.isna(parsed):
+                    record[column] = None
+                else:
+                    record[column] = parsed.date().isoformat()
                 continue
             if pd.isna(value):
                 record[column] = None
@@ -598,6 +629,57 @@ def render_allocations(
     )
 
 
+def render_expertise(
+    expertise: List[EmployeeExpertise],
+    employees: List[Employee],
+    processes: List[Process],
+):
+    st.subheader("Employee expertise")
+
+    if not employees or not processes:
+        st.info("Add employees and processes to manage expertise records.")
+        return
+
+    employee_options = {
+        employee.uuid: (
+            f"{employee.first_name} {employee.last_name}".strip()
+            or employee.trigram
+            or employee.uuid
+        )
+        for employee in employees
+    }
+    process_options = {process.uuid: process.name for process in processes}
+
+    def _label(record: Dict[str, Any]) -> str:
+        employee_label = employee_options.get(record.get("employee_uuid"), "Unknown employee")
+        process_label = process_options.get(record.get("process_uuid"), "Unknown process")
+        return f"{employee_label} → {process_label}"
+
+    _smart_editor(
+        items=expertise,
+        model_cls=EmployeeExpertise,
+        dataset_key="expertise_levels",
+        save_label="Save expertise",
+        column_labels={
+            "employee_uuid": "Employee",
+            "process_uuid": "Process",
+            "level": "Level",
+            "start_date": "Start date",
+            "end_date": "End date",
+        },
+        select_options={
+            "employee_uuid": employee_options,
+            "process_uuid": process_options,
+        },
+        number_columns={
+            "level": {"min_value": 1, "max_value": 5, "step": 1, "format": "%d"},
+        },
+        uuid_prefix="expertise",
+        labeler=_label,
+        date_columns=["start_date", "end_date"],
+    )
+
+
 def render_scenarios(scenarios: List[Scenario]):
     st.subheader("Scenarios")
     df = pd.DataFrame(
@@ -622,6 +704,7 @@ def main():
             "Processes",
             "Required Coverage",
             "Allocations",
+            "Expertise",
             "Scenarios",
         ]
     )
@@ -647,6 +730,12 @@ def main():
             data["support_allocations"],
         )
     with tabs[7]:
+        render_expertise(
+            data["expertise_levels"],
+            data["employees"],
+            data["processes"],
+        )
+    with tabs[8]:
         render_scenarios(data["scenarios"])
 
 
