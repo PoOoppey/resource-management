@@ -474,6 +474,164 @@ def _merge_visible_and_hidden_rows(
     return merged
 
 
+def _format_allocation_percentage(value: float | None) -> str:
+    if value is None or pd.isna(value):
+        return "—"
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return "—"
+    return f"{numeric * 100:.0f}%"
+
+
+def _summarize_role_assignments(
+    rows: pd.DataFrame, role_labels: Dict[str, str]
+) -> str:
+    if rows is None or rows.empty:
+        return "—"
+
+    assignments: List[str] = []
+    for _, row in rows.iterrows():
+        role_identifier = _stringify_nullable(row.get("role_uuid"))
+        role_label = role_labels.get(role_identifier, role_identifier or "—")
+        percentage = row.get("percentage")
+        percentage_text = ""
+        if not _is_missing(percentage):
+            try:
+                percentage_text = f" ({float(percentage) * 100:.0f}%)"
+            except (TypeError, ValueError):
+                percentage_text = ""
+        assignments.append(f"{role_label}{percentage_text}")
+
+    return "; ".join(assignments) if assignments else "—"
+
+
+def _summarize_employee_allocations(
+    baseline_df: pd.DataFrame,
+    scenario_df: pd.DataFrame,
+    employee_labels: Dict[str, str],
+    role_labels: Dict[str, str],
+    show_differences_only: bool,
+) -> pd.DataFrame:
+    baseline = baseline_df.copy()
+    scenario = scenario_df.copy()
+
+    for df in (baseline, scenario):
+        if df.empty:
+            continue
+        if "employee_uuid" in df.columns:
+            df["employee_uuid"] = df["employee_uuid"].apply(_stringify_nullable)
+        if "role_uuid" in df.columns:
+            df["role_uuid"] = df["role_uuid"].apply(_stringify_nullable)
+        if "percentage" in df.columns:
+            df["percentage"] = pd.to_numeric(df["percentage"], errors="coerce")
+
+    employee_ids: set[str] = set()
+    if not baseline.empty and "employee_uuid" in baseline.columns:
+        employee_ids.update(
+            value for value in baseline["employee_uuid"].dropna().astype(str) if value
+        )
+    if not scenario.empty and "employee_uuid" in scenario.columns:
+        employee_ids.update(
+            value for value in scenario["employee_uuid"].dropna().astype(str) if value
+        )
+
+    summary_rows: List[Dict[str, str]] = []
+
+    for employee_id in sorted(
+        employee_ids, key=lambda identifier: employee_labels.get(identifier, identifier).lower()
+    ):
+        if "employee_uuid" in baseline.columns:
+            baseline_rows = baseline[baseline["employee_uuid"] == employee_id]
+        else:
+            baseline_rows = pd.DataFrame(columns=baseline.columns)
+        if "employee_uuid" in scenario.columns:
+            scenario_rows = scenario[scenario["employee_uuid"] == employee_id]
+        else:
+            scenario_rows = pd.DataFrame(columns=scenario.columns)
+
+        baseline_subset = baseline_df.copy()
+        if "employee_uuid" in baseline_subset.columns:
+            baseline_subset = baseline_subset[
+                baseline_subset["employee_uuid"].apply(_stringify_nullable) == employee_id
+            ]
+        scenario_subset = scenario_df.copy()
+        if "employee_uuid" in scenario_subset.columns:
+            scenario_subset = scenario_subset[
+                scenario_subset["employee_uuid"].apply(_stringify_nullable) == employee_id
+            ]
+
+        employee_label = employee_labels.get(employee_id, employee_id)
+        baseline_total = (
+            float(baseline_rows["percentage"].sum()) if not baseline_rows.empty else None
+        )
+        scenario_total = (
+            float(scenario_rows["percentage"].sum()) if not scenario_rows.empty else None
+        )
+
+        annotated_df, removed_df = _annotate_with_diff(baseline_subset, scenario_subset)
+
+        change_notes: List[str] = []
+        if not annotated_df.empty and DIFF_COLUMN_LABEL in annotated_df.columns:
+            for diff_text in annotated_df[DIFF_COLUMN_LABEL]:
+                note = _stringify_nullable(diff_text)
+                if note and note != "Unchanged":
+                    change_notes.append(note)
+
+        if not removed_df.empty:
+            removed_roles = _summarize_role_assignments(removed_df, role_labels)
+            if removed_roles != "—":
+                change_notes.append(f"Removed: {removed_roles}")
+            else:
+                change_notes.append("Removed allocations")
+
+        if baseline_rows.empty and not scenario_rows.empty:
+            added_roles = _summarize_role_assignments(scenario_rows, role_labels)
+            if added_roles != "—":
+                change_notes.append(f"Added: {added_roles}")
+
+        baseline_roles = _summarize_role_assignments(baseline_rows, role_labels)
+        scenario_roles = _summarize_role_assignments(scenario_rows, role_labels)
+
+        if baseline_rows.empty and not scenario_rows.empty:
+            status = "Added"
+        elif scenario_rows.empty and not baseline_rows.empty:
+            status = "Removed"
+        elif change_notes:
+            status = "Updated"
+        else:
+            status = "Unchanged"
+
+        if show_differences_only and status == "Unchanged":
+            continue
+
+        summary_rows.append(
+            {
+                "Employee": employee_label or employee_id or "—",
+                "Baseline allocations": baseline_roles,
+                "Baseline utilisation": _format_allocation_percentage(baseline_total),
+                "Scenario allocations": scenario_roles,
+                "Scenario utilisation": _format_allocation_percentage(scenario_total),
+                "Status": status,
+                "Details": "; ".join(dict.fromkeys(change_notes)) if change_notes else "—",
+            }
+        )
+
+    columns = [
+        "Employee",
+        "Baseline allocations",
+        "Baseline utilisation",
+        "Scenario allocations",
+        "Scenario utilisation",
+        "Status",
+        "Details",
+    ]
+    if not summary_rows:
+        return pd.DataFrame(columns=columns)
+
+    return pd.DataFrame(summary_rows, columns=columns)
+
+
 def _render_allocation_tab(
     *,
     scenario: Scenario,
@@ -521,38 +679,19 @@ def _render_allocation_tab(
         if column in summary_df.columns:
             summary_df[column] = summary_df[column].apply(_stringify_nullable)
 
-    display_df = summary_df.copy()
-    if "employee_uuid" in display_df.columns:
-        display_df["Employee"] = display_df["employee_uuid"].apply(
-            lambda value: employee_labels.get(value, value) if value else "—"
-        )
-    if "role_uuid" in display_df.columns:
-        display_df["Role"] = display_df["role_uuid"].apply(
-            lambda value: role_labels.get(value, value) if value else "—"
-        )
-    if "percentage" in display_df.columns:
-        display_df["Allocation %"] = display_df["percentage"].apply(
-            lambda value: "—"
-            if _is_missing(value)
-            else f"{float(value) * 100:.0f}%"
-        )
-    if "weight" in display_df.columns:
-        display_df["Weight"] = display_df["weight"]
+    summary_table = _summarize_employee_allocations(
+        baseline_df,
+        scenario_df,
+        employee_labels,
+        role_labels,
+        show_differences_only,
+    )
 
-    overview_columns = [
-        column
-        for column in ["Employee", "Role", "Allocation %", "Weight", DIFF_COLUMN_LABEL]
-        if column in display_df.columns
-    ]
-
-    if show_differences_only and DIFF_COLUMN_LABEL in display_df.columns:
-        display_df = display_df[display_df[DIFF_COLUMN_LABEL] != "Unchanged"]
-
-    if display_df.empty:
-        st.info("No allocation differences to display for the selected criteria.")
+    if summary_table.empty:
+        st.info("No allocation data available for the selected criteria.")
     else:
         st.dataframe(
-            display_df[overview_columns],
+            summary_table,
             use_container_width=True,
             hide_index=True,
         )
@@ -760,6 +899,27 @@ def _render_allocation_tab(
         else pd.DataFrame(columns=support_base_columns)
     )
 
+    _, support_removed_df = _annotate_with_diff(
+        baseline_support_filtered, scenario_support_filtered
+    )
+
+    support_display_df = scenario_support_filtered.copy()
+    if support_display_df.empty:
+        support_display_df = pd.DataFrame(columns=list(support_base_columns) + ["Status"])
+    else:
+        support_display_df["Status"] = "Active"
+
+    if not support_removed_df.empty:
+        removed_display = support_removed_df.reindex(columns=support_base_columns).copy()
+        removed_display["Status"] = "Removed"
+        support_display_df = pd.concat(
+            [support_display_df, removed_display], ignore_index=True, sort=False
+        )
+        ordered_columns = list(support_base_columns) + ["Status"]
+        support_display_df = support_display_df.reindex(columns=ordered_columns)
+    elif "Status" not in support_display_df.columns:
+        support_display_df["Status"] = "Active"
+
     support_column_config: Dict[str, Any] = {}
     if "uuid" in scenario_support_filtered.columns:
         support_column_config["uuid"] = st.column_config.TextColumn(
@@ -785,54 +945,29 @@ def _render_allocation_tab(
         support_column_config["weight"] = st.column_config.NumberColumn(
             "Weight", min_value=0.0, step=0.1
         )
+    support_column_config["Status"] = st.column_config.TextColumn("Status", disabled=True)
 
     st.caption("Support allocations linked to the selected employee")
     support_editor_df = st.data_editor(
-        scenario_support_filtered,
+        support_display_df,
         num_rows="dynamic",
         use_container_width=True,
-        hide_index="uuid" in scenario_support_filtered.columns,
+        hide_index=True,
         column_config=support_column_config or None,
         key=f"scenario_support_editor_{scenario.uuid}_{selected_employee}",
     )
-
-    _, support_removed_df = _annotate_with_diff(
-        baseline_support_filtered, scenario_support_filtered
-    )
-    if not support_removed_df.empty:
-        support_preview = support_removed_df.copy()
-        if "allocation_uuid" in support_preview.columns:
-            support_preview["Role allocation"] = support_preview["allocation_uuid"].apply(
-                lambda value: allocation_labels.get(value, value) if value else "—"
-            )
-        if "process_uuid" in support_preview.columns:
-            support_preview["Process"] = support_preview["process_uuid"].apply(
-                lambda value: process_labels.get(value, value) if value else "—"
-            )
-        if "percentage" in support_preview.columns:
-            support_preview["Allocation %"] = support_preview["percentage"].apply(
-                lambda value: "—"
-                if _is_missing(value)
-                else f"{float(value) * 100:.0f}%"
-            )
-        st.caption("Removed support allocations in this scenario")
-        st.dataframe(
-            support_preview[
-                [
-                    column
-                    for column in ["Role allocation", "Process", "Allocation %"]
-                    if column in support_preview.columns
-                ]
-            ],
-            use_container_width=True,
-            hide_index=True,
-        )
 
     if st.button(
         "Save support allocation changes",
         key=f"save_support_{scenario.uuid}_{selected_employee}",
     ):
-        edited_support_df = support_editor_df.copy().reindex(columns=support_base_columns)
+        edited_support_df = support_editor_df.copy()
+        if "Status" in edited_support_df.columns:
+            removed_mask = edited_support_df["Status"] == "Removed"
+            if removed_mask.any():
+                edited_support_df = edited_support_df.loc[~removed_mask].copy()
+            edited_support_df = edited_support_df.drop(columns=["Status"])
+        edited_support_df = edited_support_df.reindex(columns=support_base_columns)
         for column in ["allocation_uuid", "process_uuid"]:
             if column in edited_support_df.columns:
                 edited_support_df[column] = edited_support_df[column].apply(
@@ -912,6 +1047,21 @@ def _render_generic_dataset_tab(
         if field in display_df.columns:
             display_df[field] = display_df[field].apply(_stringify_nullable)
 
+    removed_display_df = pd.DataFrame()
+    if not removed_df.empty:
+        removed_display_df = removed_df.reindex(columns=column_order).copy()
+        removed_display_df[DIFF_COLUMN_LABEL] = "Removed"
+        for field in relations:
+            if field in removed_display_df.columns:
+                removed_display_df[field] = removed_display_df[field].apply(
+                    _stringify_nullable
+                )
+        display_df = pd.concat(
+            [display_df, removed_display_df], ignore_index=True, sort=False
+        )
+        if not display_df.empty:
+            display_df = display_df.reindex(columns=column_order)
+
     column_config: Dict[str, Any] = {}
     if "uuid" in display_df.columns:
         column_config["uuid"] = st.column_config.TextColumn("UUID", disabled=True)
@@ -931,45 +1081,19 @@ def _render_generic_dataset_tab(
         display_df,
         num_rows="dynamic",
         use_container_width=True,
-        hide_index="uuid" in display_df.columns,
+        hide_index=True,
         column_config=column_config or None,
         key=f"scenario_editor_{scenario.uuid}_{dataset}",
     )
-
-    if not removed_df.empty:
-        removed_preview = removed_df.copy()
-        for column in removed_preview.columns:
-            removed_preview[column] = removed_preview[column].apply(_stringify_nullable)
-
-        labeled_columns: Dict[str, str] = {}
-        for field, (related_dataset, alias) in relations.items():
-            options = label_maps.get(related_dataset, {})
-            if field in removed_preview.columns:
-                label_column = alias.replace("_", " ").title()
-                labeled_columns[label_column] = field
-                removed_preview[label_column] = removed_preview[field].apply(
-                    lambda value: options.get(value, value) if value else "—"
-                )
-
-        ordered_preview_columns = list(removed_preview.columns)
-        for label_column, source_column in labeled_columns.items():
-            if label_column in ordered_preview_columns and source_column in ordered_preview_columns:
-                ordered_preview_columns.remove(label_column)
-                source_index = ordered_preview_columns.index(source_column)
-                ordered_preview_columns.insert(source_index + 1, label_column)
-
-        st.caption("Removed entries in this scenario")
-        st.dataframe(
-            removed_preview[ordered_preview_columns],
-            use_container_width=True,
-            hide_index="uuid" in removed_preview.columns,
-        )
 
     if st.button(f"Save {label.lower()} changes", key=f"save_{scenario.uuid}_{dataset}"):
         edited_df = editor_df.copy()
         if show_differences_only and diff_mask is not None:
             edited_df = _merge_visible_and_hidden_rows(edited_df, full_display_df, diff_mask)
         if DIFF_COLUMN_LABEL in edited_df.columns:
+            removed_mask = edited_df[DIFF_COLUMN_LABEL] == "Removed"
+            if removed_mask.any():
+                edited_df = edited_df.loc[~removed_mask].copy()
             edited_df = edited_df.drop(columns=[DIFF_COLUMN_LABEL])
 
         new_adjustments = _calculate_dataset_adjustments(
@@ -983,6 +1107,33 @@ def _render_generic_dataset_tab(
         update_data("scenarios", baseline_data["scenarios"])
         st.success(f"Scenario adjustments for {label.lower()} saved.")
         st.experimental_rerun()
+
+
+def _render_scenario_creator(scenarios: List[Scenario]) -> None:
+    st.subheader("Create a scenario")
+    with st.expander("Add a new scenario", expanded=not scenarios):
+        raw_name = st.text_input("Scenario name", key="scenario_creation_name")
+        new_name = raw_name.strip()
+        create_disabled = not new_name
+
+        if st.button(
+            "Create scenario",
+            key="scenario_creation_button",
+            disabled=create_disabled,
+        ):
+            if any(new_name.lower() == scenario.name.strip().lower() for scenario in scenarios):
+                st.error("A scenario with this name already exists.")
+                return
+
+            new_scenario = Scenario(
+                uuid=_generate_uuid("scenario"),
+                name=new_name,
+                adjustments=[],
+            )
+            updated = scenarios + [new_scenario]
+            update_data("scenarios", updated)
+            st.success(f"Scenario '{new_name}' created.")
+            st.experimental_rerun()
 
 
 def _scenario_select(scenarios: List[Scenario]) -> Scenario | None:
@@ -1223,8 +1374,10 @@ def main():
     data = get_data()
     scenarios = data.get("scenarios", [])
 
+    _render_scenario_creator(scenarios)
+
     if not scenarios:
-        st.info("No scenarios available. Create a scenario in the data management page.")
+        st.info("Create a scenario to begin planning adjustments.")
         return
 
     st.subheader("Scenario selection")

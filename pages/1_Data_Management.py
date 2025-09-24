@@ -20,7 +20,6 @@ from models import (
     RequiredCoverage,
     Role,
     RoleType,
-    Scenario,
     SupportAllocation,
     SupportStatus,
 )
@@ -493,8 +492,35 @@ def render_allocations(
     stored_employee_uuid: Optional[str] = st.session_state.get("selected_employee_uuid")
     selected_employee_uuid: Optional[str] = None
     if overview_df is not None and not overview_df.empty:
-        selection = st.session_state.get("allocation_overview", {})
-        selected_rows = selection.get("selection", {}).get("rows", [])
+        selection_state = st.session_state.get("allocation_overview", {})
+
+        def _extract_selected_rows(payload: Dict[str, Any]) -> List[int]:
+            if not isinstance(payload, dict):
+                return []
+            candidates: List[Any] = []
+            selection_info = payload.get("selection", {}) if isinstance(payload, dict) else {}
+            for key in ("rows", "row_indices"):
+                values = selection_info.get(key)
+                if values:
+                    candidates = values
+                    break
+            if not candidates:
+                fallback = payload.get("selected_rows")
+                if fallback:
+                    candidates = fallback
+            if isinstance(candidates, dict):
+                candidates = list(candidates.keys())
+            if isinstance(candidates, set):
+                candidates = list(candidates)
+            normalized: List[int] = []
+            for value in candidates:
+                if isinstance(value, (int, float)) and not pd.isna(value):
+                    normalized.append(int(value))
+                elif isinstance(value, str) and value.isdigit():
+                    normalized.append(int(value))
+            return normalized
+
+        selected_rows = _extract_selected_rows(selection_state)
         if selected_rows:
             row_position = selected_rows[0]
             if 0 <= row_position < len(overview_df.index):
@@ -680,18 +706,6 @@ def render_expertise(
     )
 
 
-def render_scenarios(scenarios: List[Scenario]):
-    st.subheader("Scenarios")
-    df = pd.DataFrame(
-        {
-            "uuid": [scn.uuid for scn in scenarios],
-            "name": [scn.name for scn in scenarios],
-            "adjustments": [len(scn.adjustments) for scn in scenarios],
-        }
-    )
-    st.dataframe(df)
-
-
 def main():
     st.title("Data Management")
     data = get_data()
@@ -705,7 +719,6 @@ def main():
             "Required Coverage",
             "Allocations",
             "Expertise",
-            "Scenarios",
         ]
     )
 
@@ -735,8 +748,6 @@ def main():
             data["employees"],
             data["processes"],
         )
-    with tabs[8]:
-        render_scenarios(data["scenarios"])
 
 
 if __name__ == "__main__":
