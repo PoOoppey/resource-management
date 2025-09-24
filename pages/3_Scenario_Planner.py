@@ -18,6 +18,8 @@ from utils.relations import (
 )
 from utils.styling import coverage_style
 
+st.set_page_config(page_title="Scenario", layout="wide")
+
 
 DIFF_COLUMN_LABEL = "Diff vs baseline"
 
@@ -841,7 +843,7 @@ def _render_allocation_tab(
         _merge_adjustments(scenario, dataset, new_adjustments)
         update_data("scenarios", baseline_data["scenarios"])
         st.success("Scenario allocations saved.")
-        st.experimental_rerun()
+        st.rerun()
 
     st.markdown("#### Support allocations")
 
@@ -997,7 +999,7 @@ def _render_allocation_tab(
         _merge_adjustments(scenario, support_dataset, new_adjustments)
         update_data("scenarios", baseline_data["scenarios"])
         st.success("Scenario support allocations saved.")
-        st.experimental_rerun()
+        st.rerun()
 
 
 def _render_generic_dataset_tab(
@@ -1106,7 +1108,7 @@ def _render_generic_dataset_tab(
         _merge_adjustments(scenario, dataset, new_adjustments)
         update_data("scenarios", baseline_data["scenarios"])
         st.success(f"Scenario adjustments for {label.lower()} saved.")
-        st.experimental_rerun()
+        st.rerun()
 
 
 def _render_scenario_creator(scenarios: List[Scenario]) -> None:
@@ -1133,7 +1135,7 @@ def _render_scenario_creator(scenarios: List[Scenario]) -> None:
             updated = scenarios + [new_scenario]
             update_data("scenarios", updated)
             st.success(f"Scenario '{new_name}' created.")
-            st.experimental_rerun()
+            st.rerun()
 
 
 def _scenario_select(scenarios: List[Scenario]) -> Scenario | None:
