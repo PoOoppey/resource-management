@@ -146,8 +146,6 @@ def main():
 
     filter_container = st.container()
     with filter_container:
-        st.markdown("### Filters")
-        st.divider()
         primary_row = st.columns([1.2, 1, 1.6])
 
         with primary_row[0]:
