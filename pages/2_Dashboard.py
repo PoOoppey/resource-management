@@ -25,7 +25,11 @@ DATA_DISPLAY = {
     "live": {"Coverage": "coverage", "JIRA": "jira"},
 }
 
-STATIC_COLUMN_STYLE = {"background-color": "#f3f0ff", "font-style": "italic"}
+STATIC_COLUMN_STYLE = {
+    "background-color": "#ede9fe",
+    "font-style": "italic",
+    "color": "#111827",
+}
 
 
 def _default_date_range() -> tuple[date, date]:

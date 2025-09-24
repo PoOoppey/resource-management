@@ -110,6 +110,190 @@ def _normalize_value(value):
     return value
 
 
+def _stringify_nullable(value: object) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value.strip()
+    try:
+        if pd.isna(value):
+            return ""
+    except Exception:
+        pass
+    return str(value)
+
+
+def _combined_dataset_frame(
+    dataset: str, baseline_data: Dict[str, Iterable], modified_data: Dict[str, Iterable]
+) -> pd.DataFrame:
+    baseline_df = _items_to_dataframe(baseline_data.get(dataset, [])).copy()
+    modified_df = _items_to_dataframe(modified_data.get(dataset, [])).copy()
+
+    frames = [df for df in (modified_df, baseline_df) if not df.empty]
+    if not frames:
+        return pd.DataFrame()
+
+    combined = pd.concat(frames, ignore_index=True, sort=False)
+    if "uuid" in combined.columns:
+        combined["uuid"] = combined["uuid"].apply(_stringify_nullable)
+        combined = combined.drop_duplicates(subset="uuid", keep="first")
+    return combined
+
+
+def _build_office_labels(
+    baseline_data: Dict[str, Iterable], modified_data: Dict[str, Iterable]
+) -> Dict[str, str]:
+    offices_df = _combined_dataset_frame("offices", baseline_data, modified_data)
+    labels: Dict[str, str] = {}
+    if offices_df.empty or "uuid" not in offices_df.columns:
+        return labels
+    for _, row in offices_df.iterrows():
+        identifier = _stringify_nullable(row.get("uuid"))
+        if not identifier:
+            continue
+        name = _stringify_nullable(row.get("name"))
+        code = _stringify_nullable(row.get("code"))
+        labels[identifier] = name or code or identifier
+    return labels
+
+
+def _build_role_labels(
+    baseline_data: Dict[str, Iterable], modified_data: Dict[str, Iterable]
+) -> Dict[str, str]:
+    roles_df = _combined_dataset_frame("roles", baseline_data, modified_data)
+    labels: Dict[str, str] = {}
+    if roles_df.empty or "uuid" not in roles_df.columns:
+        return labels
+    for _, row in roles_df.iterrows():
+        identifier = _stringify_nullable(row.get("uuid"))
+        if not identifier:
+            continue
+        name = _stringify_nullable(row.get("name"))
+        labels[identifier] = name or identifier
+    return labels
+
+
+def _build_process_labels(
+    baseline_data: Dict[str, Iterable], modified_data: Dict[str, Iterable]
+) -> Dict[str, str]:
+    processes_df = _combined_dataset_frame("processes", baseline_data, modified_data)
+    labels: Dict[str, str] = {}
+    if processes_df.empty or "uuid" not in processes_df.columns:
+        return labels
+    for _, row in processes_df.iterrows():
+        identifier = _stringify_nullable(row.get("uuid"))
+        if not identifier:
+            continue
+        name = _stringify_nullable(row.get("name"))
+        key = _stringify_nullable(row.get("key"))
+        labels[identifier] = name or key or identifier
+    return labels
+
+
+def _build_employee_labels(
+    baseline_data: Dict[str, Iterable],
+    modified_data: Dict[str, Iterable],
+    office_labels: Dict[str, str],
+) -> Dict[str, str]:
+    employees_df = _combined_dataset_frame("employees", baseline_data, modified_data)
+    labels: Dict[str, str] = {}
+    if employees_df.empty or "uuid" not in employees_df.columns:
+        return labels
+    for _, row in employees_df.iterrows():
+        identifier = _stringify_nullable(row.get("uuid"))
+        if not identifier:
+            continue
+        first = _stringify_nullable(row.get("first_name"))
+        last = _stringify_nullable(row.get("last_name"))
+        full_name = " ".join(part for part in [first, last] if part).strip()
+        email = _stringify_nullable(row.get("email"))
+        base_label = full_name or email or identifier
+        office_uuid = _stringify_nullable(row.get("office_uuid"))
+        office_label = office_labels.get(office_uuid, "")
+        labels[identifier] = (
+            f"{base_label} – {office_label}" if office_label else base_label
+        )
+    return labels
+
+
+def _build_allocation_labels(
+    baseline_data: Dict[str, Iterable],
+    modified_data: Dict[str, Iterable],
+    employee_labels: Dict[str, str],
+    role_labels: Dict[str, str],
+) -> Dict[str, str]:
+    allocations_df = _combined_dataset_frame("allocations", baseline_data, modified_data)
+    labels: Dict[str, str] = {}
+    if allocations_df.empty or "uuid" not in allocations_df.columns:
+        return labels
+    for _, row in allocations_df.iterrows():
+        identifier = _stringify_nullable(row.get("uuid"))
+        if not identifier:
+            continue
+        employee_uuid = _stringify_nullable(row.get("employee_uuid"))
+        role_uuid = _stringify_nullable(row.get("role_uuid"))
+        employee_label = employee_labels.get(employee_uuid, employee_uuid)
+        role_label = role_labels.get(role_uuid, role_uuid)
+        pieces = [part for part in [employee_label, role_label] if part]
+        base_label = " • ".join(pieces) if pieces else identifier
+        percentage = row.get("percentage")
+        display_label = base_label
+        try:
+            percentage_value = float(percentage)
+            if not pd.isna(percentage_value):
+                display_label = f"{base_label} ({percentage_value * 100:.0f}%)"
+        except (TypeError, ValueError):
+            pass
+        labels[identifier] = display_label or identifier
+    return labels
+
+
+def _build_label_maps(
+    baseline_data: Dict[str, Iterable], modified_data: Dict[str, Iterable]
+) -> Dict[str, Dict[str, str]]:
+    office_labels = _build_office_labels(baseline_data, modified_data)
+    role_labels = _build_role_labels(baseline_data, modified_data)
+    process_labels = _build_process_labels(baseline_data, modified_data)
+    employee_labels = _build_employee_labels(
+        baseline_data, modified_data, office_labels
+    )
+    allocation_labels = _build_allocation_labels(
+        baseline_data, modified_data, employee_labels, role_labels
+    )
+    return {
+        "offices": office_labels,
+        "roles": role_labels,
+        "processes": process_labels,
+        "employees": employee_labels,
+        "allocations": allocation_labels,
+    }
+
+
+def _make_selectbox_column(
+    label: str, options: Dict[str, str]
+) -> st.column_config.SelectboxColumn:
+    option_values = [""]
+    option_values.extend(key for key in options.keys() if key)
+    seen: set[str] = set()
+    ordered_options: list[str] = []
+    for value in option_values:
+        if value in seen:
+            continue
+        seen.add(value)
+        ordered_options.append(value)
+
+    def _format(value: str) -> str:
+        if not value:
+            return "—"
+        return options.get(value, value)
+
+    return st.column_config.SelectboxColumn(
+        label,
+        options=ordered_options,
+        format_func=_format,
+    )
+
+
 def _format_value(value) -> str:
     if _is_missing(value):
         return "—"
@@ -290,192 +474,6 @@ def _merge_visible_and_hidden_rows(
     return merged
 
 
-def _build_allocation_overview(modified_data: Dict[str, Iterable]) -> pd.DataFrame:
-    employees_df = _items_to_dataframe(modified_data.get("employees", []))
-    allocations_df = _items_to_dataframe(modified_data.get("allocations", []))
-    roles_df = _items_to_dataframe(modified_data.get("roles", []))
-    processes_df = _items_to_dataframe(modified_data.get("processes", []))
-    support_df = _items_to_dataframe(modified_data.get("support_allocations", []))
-
-    role_names: Dict[str, str] = {}
-    if not roles_df.empty and {"uuid", "name"}.issubset(roles_df.columns):
-        role_names = {
-            str(row["uuid"]): str(row["name"]) for _, row in roles_df.iterrows()
-        }
-
-    process_names: Dict[str, str] = {}
-    if not processes_df.empty and {"uuid", "name"}.issubset(processes_df.columns):
-        process_names = {
-            str(row["uuid"]): str(row["name"]) for _, row in processes_df.iterrows()
-        }
-
-    support_lookup: Dict[str, pd.DataFrame] = {}
-    if not support_df.empty and "allocation_uuid" in support_df.columns:
-        allocation_ids = support_df["allocation_uuid"].fillna("").astype(str)
-        support_df = support_df.assign(allocation_uuid=allocation_ids)
-        support_lookup = {
-            allocation_uuid: group
-            for allocation_uuid, group in support_df.groupby("allocation_uuid")
-        }
-
-    overview_rows: List[Dict[str, Any]] = []
-
-    if employees_df.empty or "uuid" not in employees_df.columns:
-        return pd.DataFrame(
-            columns=["Employee", "Utilization", "Role Split", "Support Details"]
-        )
-
-    for _, employee in employees_df.iterrows():
-        employee_uuid = str(employee.get("uuid", ""))
-        if not employee_uuid:
-            continue
-
-        first = str(employee.get("first_name", "") or "").strip()
-        last = str(employee.get("last_name", "") or "").strip()
-        employee_name = f"{first} {last}".strip() or employee_uuid
-
-        employee_allocations = pd.DataFrame()
-        if not allocations_df.empty and "employee_uuid" in allocations_df.columns:
-            employee_allocations = allocations_df[
-                allocations_df["employee_uuid"].fillna("").astype(str) == employee_uuid
-            ]
-
-        utilization = 0.0
-        role_splits: List[str] = []
-        support_details: List[str] = []
-
-        if not employee_allocations.empty:
-            if "percentage" in employee_allocations.columns:
-                utilization = float(
-                    employee_allocations["percentage"].fillna(0.0).astype(float).sum()
-                )
-
-            for _, allocation in employee_allocations.iterrows():
-                allocation_uuid = str(allocation.get("uuid", ""))
-                role_uuid = str(allocation.get("role_uuid", ""))
-                percentage = float(allocation.get("percentage", 0.0) or 0.0)
-                role_name = role_names.get(role_uuid, role_uuid or "—")
-                role_splits.append(f"{role_name} ({percentage * 100:.0f}%)")
-
-                allocation_weight = allocation.get("weight", 1.0)
-                try:
-                    allocation_weight_value = float(allocation_weight)
-                except (TypeError, ValueError):
-                    allocation_weight_value = 1.0
-
-                supports = support_lookup.get(allocation_uuid)
-                if supports is None:
-                    continue
-                for _, support in supports.iterrows():
-                    process_uuid = str(support.get("process_uuid", ""))
-                    process_name = process_names.get(process_uuid, process_uuid or "—")
-                    support_percentage = float(support.get("percentage", 0.0) or 0.0)
-                    weight = support.get("weight")
-                    try:
-                        weight_value = float(weight)
-                    except (TypeError, ValueError):
-                        weight_value = allocation_weight_value
-                    support_details.append(
-                        f"{process_name} ({support_percentage * 100:.0f}% · w={weight_value:.2f})"
-                    )
-
-        overview_rows.append(
-            {
-                "employee_uuid": employee_uuid,
-                "Employee": employee_name,
-                "Utilization": utilization,
-                "Role Split": "; ".join(role_splits) if role_splits else "—",
-                "Support Details": "; ".join(support_details)
-                if support_details
-                else "—",
-            }
-        )
-
-    if overview_rows:
-        overview_df = pd.DataFrame(overview_rows).set_index("employee_uuid")
-    else:
-        overview_df = pd.DataFrame(
-            columns=["Employee", "Utilization", "Role Split", "Support Details"]
-        )
-        overview_df.index.name = "employee_uuid"
-
-    return overview_df
-
-
-def _render_allocation_overview(
-    modified_data: Dict[str, Iterable], scenario_uuid: str
-) -> Optional[str]:
-    overview_df = _build_allocation_overview(modified_data)
-
-    selection_key = f"allocation_overview_{scenario_uuid}"
-    selected_employee_key = f"selected_employee_uuid_{scenario_uuid}"
-
-    st.caption("Select an employee to review scenario allocations and support work.")
-
-    if overview_df.empty:
-        st.info("No employees available for the current scenario.")
-        st.session_state.pop(selected_employee_key, None)
-        return None
-
-    disabled_columns = list(overview_df.columns)
-    st.data_editor(
-        overview_df,
-        hide_index=True,
-        use_container_width=True,
-        num_rows="fixed",
-        disabled=disabled_columns,
-        column_config={
-            "Employee": st.column_config.TextColumn("Employee"),
-            "Utilization": st.column_config.ProgressColumn(
-                "Utilization", format="{:.0%}", min_value=0.0, max_value=1.0
-            ),
-            "Role Split": st.column_config.TextColumn("Roles"),
-            "Support Details": st.column_config.TextColumn("Support work"),
-        },
-        key=selection_key,
-    )
-
-    stored_employee_uuid: Optional[str] = st.session_state.get(selected_employee_key)
-    selected_employee_uuid: Optional[str] = None
-
-    selection_state = st.session_state.get(selection_key, {})
-    selected_rows = selection_state.get("selection", {}).get("rows", [])
-    if selected_rows:
-        row_position = selected_rows[0]
-        if 0 <= row_position < len(overview_df.index):
-            selected_employee_uuid = overview_df.index[row_position]
-            st.session_state[selected_employee_key] = selected_employee_uuid
-    elif stored_employee_uuid and stored_employee_uuid in overview_df.index:
-        selected_employee_uuid = stored_employee_uuid
-    elif stored_employee_uuid and stored_employee_uuid not in overview_df.index:
-        st.session_state.pop(selected_employee_key, None)
-
-    employee_labels = {
-        uuid: str(overview_df.loc[uuid, "Employee"]) if "Employee" in overview_df.columns else uuid
-        for uuid in overview_df.index
-    }
-
-    if employee_labels:
-        options = list(employee_labels.keys())
-        default_uuid = st.session_state.get(selected_employee_key)
-        if selected_employee_uuid and selected_employee_uuid in options:
-            default_uuid = selected_employee_uuid
-        if default_uuid not in options:
-            default_uuid = options[0]
-            st.session_state[selected_employee_key] = default_uuid
-
-        default_index = options.index(default_uuid)
-        selected_employee_uuid = st.selectbox(
-            "Employee",
-            options,
-            index=default_index,
-            format_func=lambda value: employee_labels.get(value, value),
-            key=selected_employee_key,
-        )
-
-    return selected_employee_uuid
-
-
 def _render_allocation_tab(
     *,
     scenario: Scenario,
@@ -487,82 +485,42 @@ def _render_allocation_tab(
     modified_data: Dict[str, Iterable],
     dataset: str,
     support_dataset: str = "support_allocations",
+    label_maps: Dict[str, Dict[str, str]],
 ) -> None:
-    selected_employee_uuid = _render_allocation_overview(modified_data, scenario.uuid)
+    employee_labels = label_maps.get("employees", {})
+    role_labels = label_maps.get("roles", {})
+    process_labels = label_maps.get("processes", {})
+    allocation_labels = label_maps.get("allocations", {})
 
-    st.divider()
-
-    if not selected_employee_uuid:
-        st.info("Select an employee in the table above to manage allocations.")
-        return
-
-    employees_df = _items_to_dataframe(modified_data.get("employees", []))
-    employee_name = selected_employee_uuid
-    if not employees_df.empty and "uuid" in employees_df.columns:
-        match = employees_df[
-            employees_df["uuid"].fillna("").astype(str) == selected_employee_uuid
-        ]
-        if not match.empty:
-            first = str(match.iloc[0].get("first_name", "") or "").strip()
-            last = str(match.iloc[0].get("last_name", "") or "").strip()
-            full_name = f"{first} {last}".strip()
-            if full_name:
-                employee_name = full_name
-
-    st.markdown(f"### {employee_name}")
     st.markdown("#### Role allocations")
 
-    roles_df = _items_to_dataframe(modified_data.get("roles", []))
-    role_options: Dict[str, str] = {}
-    if not roles_df.empty and {"uuid", "name"}.issubset(roles_df.columns):
-        role_options = {
-            str(row["uuid"]): str(row.get("name", row["uuid"]))
-            for _, row in roles_df.iterrows()
-        }
-
-    def _filter_by_employee(df: pd.DataFrame) -> pd.DataFrame:
-        if df.empty or "employee_uuid" not in df.columns:
-            return pd.DataFrame(columns=df.columns)
-        return df[
-            df["employee_uuid"].fillna("").astype(str) == selected_employee_uuid
-        ]
-
-    baseline_subset = _filter_by_employee(baseline_df.copy())
-    scenario_subset = _filter_by_employee(scenario_df.copy())
-
-    annotated_subset, removed_subset = _annotate_with_diff(baseline_subset, scenario_subset)
-
-    base_columns = list(dict.fromkeys(list(scenario_df.columns) + list(baseline_df.columns)))
-    if "employee_uuid" not in base_columns:
-        base_columns.insert(0, "employee_uuid")
+    base_columns = list(
+        dict.fromkeys(list(scenario_df.columns) + list(baseline_df.columns))
+    )
     if "uuid" not in base_columns:
         base_columns.insert(0, "uuid")
-    column_order = list(dict.fromkeys(base_columns + [DIFF_COLUMN_LABEL]))
-
-    if annotated_subset.empty:
-        display_df = pd.DataFrame(columns=column_order)
+    allocation_display = scenario_df.copy()
+    if allocation_display.empty:
+        allocation_display = pd.DataFrame(columns=base_columns)
     else:
-        display_df = annotated_subset.reindex(columns=column_order)
+        allocation_display = allocation_display.reindex(columns=base_columns)
 
-    if "employee_uuid" in display_df.columns:
-        display_df["employee_uuid"] = (
-            display_df["employee_uuid"].fillna(selected_employee_uuid).replace("", selected_employee_uuid)
-        )
+    for column in ["uuid", "employee_uuid", "role_uuid"]:
+        if column in allocation_display.columns:
+            allocation_display[column] = allocation_display[column].apply(
+                _stringify_nullable
+            )
 
     column_config: Dict[str, Any] = {}
-    if "uuid" in display_df.columns:
+    if "uuid" in allocation_display.columns:
         column_config["uuid"] = st.column_config.TextColumn("UUID", disabled=True)
-    if "employee_uuid" in display_df.columns:
-        column_config["employee_uuid"] = st.column_config.TextColumn(
-            "Employee UUID", disabled=True
+    if "employee_uuid" in allocation_display.columns:
+        column_config["employee_uuid"] = _make_selectbox_column(
+            "Employee", employee_labels
         )
-    if "role_uuid" in display_df.columns:
-        column_config["role_uuid"] = st.column_config.SelectboxColumn(
-            "Role",
-            options=list(role_options.keys()),
-            format_func=lambda value: role_options.get(value, "—"),
-        )
-    if "percentage" in display_df.columns:
+    if "role_uuid" in allocation_display.columns:
+        column_config["role_uuid"] = _make_selectbox_column("Role", role_labels)
+    if "percentage" in allocation_display.columns:
         column_config["percentage"] = st.column_config.NumberColumn(
             "Allocation %",
             min_value=0.0,
@@ -570,61 +528,26 @@ def _render_allocation_tab(
             step=0.05,
             format="%.0f%%",
         )
-    if "weight" in display_df.columns:
+    if "weight" in allocation_display.columns:
         column_config["weight"] = st.column_config.NumberColumn(
             "Weight", min_value=0.0, step=0.1
         )
-    column_config[DIFF_COLUMN_LABEL] = st.column_config.TextColumn(
-        DIFF_COLUMN_LABEL, disabled=True
-    )
 
     editor_df = st.data_editor(
-        display_df,
+        allocation_display,
         num_rows="dynamic",
         use_container_width=True,
-        hide_index="uuid" in display_df.columns,
+        hide_index="uuid" in allocation_display.columns,
         column_config=column_config or None,
-        key=f"scenario_allocations_editor_{scenario.uuid}_{selected_employee_uuid}",
+        key=f"scenario_allocations_editor_{scenario.uuid}",
     )
 
-    if not removed_subset.empty:
-        removed_ids = removed_subset.get("uuid")
-        if removed_ids is not None and not removed_ids.empty:
-            removed_labels = ", ".join(str(value) for value in removed_ids.astype(str))
-        else:
-            removed_labels = f"{len(removed_subset)} record(s)"
-        st.caption(f"Removed allocations in scenario: {removed_labels}")
-
-    if st.button(
-        "Save allocation changes",
-        key=f"save_allocations_{scenario.uuid}",
-    ):
-        edited_subset = editor_df.copy()
-        if DIFF_COLUMN_LABEL in edited_subset.columns:
-            edited_subset = edited_subset.drop(columns=[DIFF_COLUMN_LABEL])
-
-        if "employee_uuid" in edited_subset.columns:
-            edited_subset["employee_uuid"] = edited_subset["employee_uuid"].apply(
-                lambda value: value if value else selected_employee_uuid
-            )
-        else:
-            edited_subset["employee_uuid"] = selected_employee_uuid
-
-        remaining = scenario_df.copy()
-        if not remaining.empty and "employee_uuid" in remaining.columns:
-            remaining = remaining[
-                remaining["employee_uuid"].fillna("").astype(str) != selected_employee_uuid
-            ]
-        else:
-            remaining = pd.DataFrame(columns=scenario_df.columns)
-
-        combined = pd.concat([edited_subset, remaining], ignore_index=True, sort=False)
-        combined = combined.reindex(columns=base_columns)
-
+    if st.button("Save allocation changes", key=f"save_allocations_{scenario.uuid}"):
+        edited_df = editor_df.copy().reindex(columns=base_columns)
         new_adjustments = _calculate_dataset_adjustments(
             dataset,
             baseline_df,
-            combined,
+            edited_df,
             baseline_data,
             modified_data,
         )
@@ -636,44 +559,6 @@ def _render_allocation_tab(
     st.divider()
     st.markdown("#### Support allocations")
 
-    role_labels = role_options
-
-    processes_df = _items_to_dataframe(modified_data.get("processes", []))
-    process_labels: Dict[str, str] = {}
-    if not processes_df.empty and {"uuid", "name"}.issubset(processes_df.columns):
-        process_labels = {
-            str(row["uuid"]): str(row.get("name", row["uuid"]))
-            for _, row in processes_df.iterrows()
-        }
-
-    def _relevant_allocations(df: pd.DataFrame) -> pd.Series:
-        if df.empty or "employee_uuid" not in df.columns:
-            return pd.Series(dtype=str)
-        return df.loc[
-            df["employee_uuid"].fillna("").astype(str) == selected_employee_uuid,
-            "uuid",
-        ].fillna("").astype(str)
-
-    scenario_alloc_ids = set(_relevant_allocations(scenario_df.copy()))
-    baseline_alloc_ids = set(_relevant_allocations(baseline_df.copy()))
-    relevant_alloc_ids = scenario_alloc_ids | baseline_alloc_ids
-
-    if not relevant_alloc_ids:
-        st.info("No support-eligible allocations available for the selected employee.")
-        return
-
-    def _filter_support(df: pd.DataFrame) -> pd.DataFrame:
-        if df.empty or "allocation_uuid" not in df.columns:
-            return pd.DataFrame(columns=df.columns)
-        return df[df["allocation_uuid"].fillna("").astype(str).isin(relevant_alloc_ids)]
-
-    baseline_support_subset = _filter_support(baseline_support_df.copy())
-    scenario_support_subset = _filter_support(scenario_support_df.copy())
-
-    annotated_subset, removed_subset = _annotate_with_diff(
-        baseline_support_subset, scenario_support_subset
-    )
-
     support_base_columns = list(
         dict.fromkeys(list(scenario_support_df.columns) + list(baseline_support_df.columns))
     )
@@ -681,60 +566,33 @@ def _render_allocation_tab(
         support_base_columns.insert(0, "uuid")
     if "allocation_uuid" not in support_base_columns:
         support_base_columns.insert(0, "allocation_uuid")
-    support_column_order = list(
-        dict.fromkeys(support_base_columns + [DIFF_COLUMN_LABEL])
-    )
 
-    if annotated_subset.empty:
-        support_display_df = pd.DataFrame(columns=support_column_order)
+    support_display = scenario_support_df.copy()
+    if support_display.empty:
+        support_display = pd.DataFrame(columns=support_base_columns)
     else:
-        support_display_df = annotated_subset.reindex(columns=support_column_order)
+        support_display = support_display.reindex(columns=support_base_columns)
 
-    allocation_options: Dict[str, str] = {}
-    scenario_allocations_df = scenario_df.copy()
-    if not scenario_allocations_df.empty and "uuid" in scenario_allocations_df.columns:
-        scenario_allocations_df = scenario_allocations_df.assign(
-            uuid=scenario_allocations_df["uuid"].fillna("").astype(str)
-        )
-        for _, allocation in scenario_allocations_df.iterrows():
-            allocation_uuid = allocation["uuid"]
-            if allocation_uuid not in relevant_alloc_ids:
-                continue
-            role_uuid = str(allocation.get("role_uuid", ""))
-            role_name = role_labels.get(role_uuid, role_uuid or "—")
-            percentage = float(allocation.get("percentage", 0.0) or 0.0)
-            allocation_options[allocation_uuid] = f"{role_name} ({percentage * 100:.0f}%)"
-
-    baseline_allocations_df = baseline_df.copy()
-    if not baseline_allocations_df.empty and "uuid" in baseline_allocations_df.columns:
-        baseline_allocations_df = baseline_allocations_df.assign(
-            uuid=baseline_allocations_df["uuid"].fillna("").astype(str)
-        )
-        for _, allocation in baseline_allocations_df.iterrows():
-            allocation_uuid = allocation["uuid"]
-            if allocation_uuid not in relevant_alloc_ids:
-                continue
-            allocation_options.setdefault(
-                allocation_uuid,
-                f"{allocation_uuid} (baseline)",
+    for column in ["uuid", "allocation_uuid", "process_uuid"]:
+        if column in support_display.columns:
+            support_display[column] = support_display[column].apply(
+                _stringify_nullable
             )
 
     support_column_config: Dict[str, Any] = {}
-    if "uuid" in support_display_df.columns:
-        support_column_config["uuid"] = st.column_config.TextColumn("UUID", disabled=True)
-    if "allocation_uuid" in support_display_df.columns:
-        support_column_config["allocation_uuid"] = st.column_config.SelectboxColumn(
-            "Role allocation",
-            options=list(allocation_options.keys()),
-            format_func=lambda value: allocation_options.get(value, "—"),
+    if "uuid" in support_display.columns:
+        support_column_config["uuid"] = st.column_config.TextColumn(
+            "UUID", disabled=True
         )
-    if "process_uuid" in support_display_df.columns:
-        support_column_config["process_uuid"] = st.column_config.SelectboxColumn(
-            "Process",
-            options=list(process_labels.keys()),
-            format_func=lambda value: process_labels.get(value, "—"),
+    if "allocation_uuid" in support_display.columns:
+        support_column_config["allocation_uuid"] = _make_selectbox_column(
+            "Role allocation", allocation_labels
         )
-    if "percentage" in support_display_df.columns:
+    if "process_uuid" in support_display.columns:
+        support_column_config["process_uuid"] = _make_selectbox_column(
+            "Process", process_labels
+        )
+    if "percentage" in support_display.columns:
         support_column_config["percentage"] = st.column_config.NumberColumn(
             "Allocation %",
             min_value=0.0,
@@ -742,54 +600,28 @@ def _render_allocation_tab(
             step=0.05,
             format="%.0f%%",
         )
-    if "weight" in support_display_df.columns:
+    if "weight" in support_display.columns:
         support_column_config["weight"] = st.column_config.NumberColumn(
             "Weight", min_value=0.0, step=0.1
         )
-    support_column_config[DIFF_COLUMN_LABEL] = st.column_config.TextColumn(
-        DIFF_COLUMN_LABEL, disabled=True
-    )
 
     support_editor_df = st.data_editor(
-        support_display_df,
+        support_display,
         num_rows="dynamic",
         use_container_width=True,
-        hide_index="uuid" in support_display_df.columns,
+        hide_index="uuid" in support_display.columns,
         column_config=support_column_config or None,
-        key=f"scenario_support_editor_{scenario.uuid}_{selected_employee_uuid}",
+        key=f"scenario_support_editor_{scenario.uuid}",
     )
 
-    if not removed_subset.empty:
-        removed_ids = removed_subset.get("uuid")
-        if removed_ids is not None and not removed_ids.empty:
-            removed_labels = ", ".join(str(value) for value in removed_ids.astype(str))
-        else:
-            removed_labels = f"{len(removed_subset)} record(s)"
-        st.caption(f"Removed support allocations in scenario: {removed_labels}")
-
     if st.button(
-        "Save support allocation changes",
-        key=f"save_support_{scenario.uuid}",
+        "Save support allocation changes", key=f"save_support_{scenario.uuid}"
     ):
-        edited_subset = support_editor_df.copy()
-        if DIFF_COLUMN_LABEL in edited_subset.columns:
-            edited_subset = edited_subset.drop(columns=[DIFF_COLUMN_LABEL])
-
-        remaining = scenario_support_df.copy()
-        if not remaining.empty and "allocation_uuid" in remaining.columns:
-            remaining = remaining[
-                ~remaining["allocation_uuid"].fillna("").astype(str).isin(relevant_alloc_ids)
-            ]
-        else:
-            remaining = pd.DataFrame(columns=scenario_support_df.columns)
-
-        combined = pd.concat([edited_subset, remaining], ignore_index=True, sort=False)
-        combined = combined.reindex(columns=support_base_columns)
-
+        edited_support_df = support_editor_df.copy().reindex(columns=support_base_columns)
         new_adjustments = _calculate_dataset_adjustments(
             support_dataset,
             baseline_support_df,
-            combined,
+            edited_support_df,
             baseline_data,
             modified_data,
         )
@@ -809,7 +641,9 @@ def _render_generic_dataset_tab(
     baseline_data: Dict[str, Iterable],
     modified_data: Dict[str, Iterable],
     show_differences_only: bool,
+    label_maps: Dict[str, Dict[str, str]],
 ) -> None:
+    relations = FOREIGN_KEY_RELATIONS.get(dataset, {})
     annotated_df, removed_df = _annotate_with_diff(baseline_df, scenario_df)
 
     base_columns = list(dict.fromkeys(list(scenario_df.columns) + list(baseline_df.columns)))
@@ -822,6 +656,11 @@ def _render_generic_dataset_tab(
         full_display_df[DIFF_COLUMN_LABEL] = full_display_df[DIFF_COLUMN_LABEL].fillna(
             "Unchanged"
         )
+
+    if not full_display_df.empty:
+        for field in relations:
+            if field in full_display_df.columns:
+                full_display_df[field] = full_display_df[field].apply(_stringify_nullable)
 
     diff_mask: Optional[pd.Series] = None
     if not full_display_df.empty:
@@ -840,9 +679,21 @@ def _render_generic_dataset_tab(
     if not display_df.empty:
         display_df = display_df.reindex(columns=column_order)
 
+    for field in relations:
+        if field in display_df.columns:
+            display_df[field] = display_df[field].apply(_stringify_nullable)
+
     column_config: Dict[str, Any] = {}
     if "uuid" in display_df.columns:
         column_config["uuid"] = st.column_config.TextColumn("UUID", disabled=True)
+    for field, (related_dataset, alias) in relations.items():
+        options = label_maps.get(related_dataset, {})
+        if field in display_df.columns:
+            label_text = alias.replace("_", " ").title()
+            if options:
+                column_config[field] = _make_selectbox_column(label_text, options)
+            else:
+                column_config.setdefault(field, st.column_config.TextColumn(label_text))
     column_config[DIFF_COLUMN_LABEL] = st.column_config.TextColumn(
         DIFF_COLUMN_LABEL, disabled=True
     )
@@ -1143,6 +994,7 @@ def main():
     )
 
     modified_data = apply_scenario(data, scenario)
+    label_maps = _build_label_maps(data, modified_data)
     scenario_coverage = compute_theoretical_coverage(
         modified_data,
         view="process",
@@ -1175,6 +1027,7 @@ def main():
                     baseline_data=data,
                     modified_data=modified_data,
                     dataset=dataset,
+                    label_maps=label_maps,
                 )
             else:
                 _render_generic_dataset_tab(
@@ -1186,6 +1039,7 @@ def main():
                     baseline_data=data,
                     modified_data=modified_data,
                     show_differences_only=show_differences_only,
+                    label_maps=label_maps,
                 )
 
     st.subheader("Scenario result")
