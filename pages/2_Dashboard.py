@@ -148,7 +148,7 @@ def main():
     with filter_container:
         st.markdown("### Filters")
         st.divider()
-        primary_row = st.columns([1.2, 1.6, 1.0])
+        primary_row = st.columns([1.2, 1, 1.6])
 
         with primary_row[0]:
             view_label = st.selectbox("View", list(VIEW_OPTIONS.keys()))
@@ -198,7 +198,7 @@ def main():
             else:
                 st.empty()
 
-        secondary_row = st.columns([1, 1.6, 1])
+        secondary_row = st.columns([0.8, 1.8, 0.8])
         selected_display_labels: list[str] = []
         with secondary_row[0]:
             segmented = st.segmented_control(
