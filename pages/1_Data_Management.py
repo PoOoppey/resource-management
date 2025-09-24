@@ -28,6 +28,9 @@ from utils.notifications import notify
 
 from uuid import uuid4
 
+st.set_page_config(page_title="Data Management", layout="wide")
+
+
 
 def _serialize_value(value: Any):
     if hasattr(value, "value"):
@@ -179,7 +182,7 @@ def _smart_editor(
 
                 return _format
 
-            column_config[column] = st.column_config.MultiSelectColumn(
+            column_config[column] = st.column_config.MultiselectColumn(
                 label,
                 options=options,
                 format_func=_make_formatter(multiselect_options[column]),

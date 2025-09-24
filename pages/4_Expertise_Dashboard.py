@@ -8,6 +8,8 @@ import streamlit as st
 from services.data_loader import get_data
 from services.expertise import build_expertise_dataframe
 
+st.set_page_config(page_title="Expertise Dashboard", layout="wide")
+
 
 def _format_date(value: object) -> str:
     if isinstance(value, date):

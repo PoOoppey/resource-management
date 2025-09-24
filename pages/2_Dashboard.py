@@ -31,6 +31,8 @@ STATIC_COLUMN_STYLE = {
     "color": "#111827",
 }
 
+st.set_page_config(page_title="Dashboard", layout="wide")
+
 
 def _default_date_range() -> tuple[date, date]:
     today = date.today()
@@ -72,15 +74,14 @@ def _style_dataframe(
         }
         style_operations.append(("format", {"formatter": formatter}))
 
-    if view == "live":
-        reference_columns = [col for col in ["Required", "Theoretical"] if col in df.columns]
-        if reference_columns:
-            style_operations.append(
-                (
-                    "set_properties",
-                    {"subset": reference_columns, **STATIC_COLUMN_STYLE},
-                )
+    reference_columns = [col for col in ["Required", "Theoretical"] if col in df.columns]
+    if reference_columns:
+        style_operations.append(
+            (
+                "set_properties",
+                {"subset": reference_columns, **STATIC_COLUMN_STYLE},
             )
+        )
 
     if view == "theoretical":
         coverage_columns = [col for col in ["Coverage"] if col in df.columns]
@@ -148,37 +149,15 @@ def main():
         st.markdown("### Filters")
         st.divider()
         primary_row = st.columns([1.2, 1.6, 1.0])
+
         with primary_row[0]:
             view_label = st.selectbox("View", list(VIEW_OPTIONS.keys()))
-        with primary_row[1]:
-            segmented = st.segmented_control(
-                "Group by",
-                list(GROUP_OPTIONS.keys()),
-                selection_mode="single",
-                default=list(GROUP_OPTIONS.keys())[0],
-            )
-            if isinstance(segmented, (list, tuple, set)):
-                segmented = next(iter(segmented), list(GROUP_OPTIONS.keys())[0])
-            group_by_label = segmented
-        with primary_row[2]:
-            unit_selection = st.segmented_control(
-                "Units",
-                list(UNIT_OPTIONS.keys()),
-                selection_mode="single",
-                default=list(UNIT_OPTIONS.keys())[0],
-            )
-            if isinstance(unit_selection, (list, tuple, set)):
-                unit_selection = next(
-                    iter(unit_selection), list(UNIT_OPTIONS.keys())[0]
-                )
-            unit_label = unit_selection or list(UNIT_OPTIONS.keys())[0]
 
         view = VIEW_OPTIONS[view_label]
         data_options = DATA_DISPLAY[view]
+        date_range = _default_date_range()
 
-        secondary_row = st.columns([1.6, 1.2, 1.4])
-        selected_display_labels: list[str] = []
-        with secondary_row[0]:
+        with primary_row[1]:
             display_labels = list(data_options.keys())
             if view == "live":
                 pill_selection = st.pills(
@@ -207,16 +186,8 @@ def main():
                     pill_selection = next(iter(pill_selection), display_labels[0] if display_labels else None)
                 selected_display_labels = [pill_selection] if pill_selection else []
             data_display_label = selected_display_labels[0] if selected_display_labels else None
-        with secondary_row[1]:
-            st.caption("Search")
-            search_term = st.text_input(
-                "Search",
-                placeholder="Filter rows by any column value",
-                label_visibility="collapsed",
-            )
 
-        date_range = _default_date_range()
-        with secondary_row[2]:
+        with primary_row[2]:
             if view == "live":
                 start, end = st.date_input(
                     "Date range",
@@ -225,8 +196,40 @@ def main():
                 )
                 date_range = (start, end)
             else:
-                st.caption("Date range")
                 st.empty()
+
+        secondary_row = st.columns([1, 1.6, 1])
+        selected_display_labels: list[str] = []
+        with secondary_row[0]:
+            segmented = st.segmented_control(
+                "Group by",
+                list(GROUP_OPTIONS.keys()),
+                selection_mode="single",
+                default=list(GROUP_OPTIONS.keys())[0],
+            )
+            if isinstance(segmented, (list, tuple, set)):
+                segmented = next(iter(segmented), list(GROUP_OPTIONS.keys())[0])
+            group_by_label = segmented
+        with secondary_row[1]:
+            st.caption("Search")
+            search_term = st.text_input(
+                "Search",
+                placeholder="Filter rows by any column value",
+                label_visibility="collapsed",
+            )
+
+        with secondary_row[2]:
+            unit_selection = st.segmented_control(
+                "Units",
+                list(UNIT_OPTIONS.keys()),
+                selection_mode="single",
+                default=list(UNIT_OPTIONS.keys())[0],
+            )
+            if isinstance(unit_selection, (list, tuple, set)):
+                unit_selection = next(
+                    iter(unit_selection), list(UNIT_OPTIONS.keys())[0]
+                )
+            unit_label = unit_selection or list(UNIT_OPTIONS.keys())[0]
 
     group_by = GROUP_OPTIONS[group_by_label]
     unit_value = UNIT_OPTIONS[unit_label]
