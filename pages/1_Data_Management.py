@@ -452,7 +452,7 @@ def render_allocations(
                 process_name = process.name if process else support.process_uuid
                 weight = support.effective_weight(allocation.weight)
                 support_details.append(
-                    f"{process_name} ({support.percentage * 100:.0f}% · w={weight:.2f})"
+                    f"{process_name} ({support.percentage * 100:.0f}%x{weight:.1f})"
                 )
 
         overview_rows.append(
