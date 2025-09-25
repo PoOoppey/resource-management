@@ -1108,10 +1108,11 @@ def _render_allocation_tab(
                 "Role", role_labels
             )
         if "percentage" in employee_allocations.columns:
-            allocation_column_config["percentage"] = st.column_config.ProgressColumn(
+            allocation_column_config["percentage"] = st.column_config.NumberColumn(
                 "Allocation %",
                 min_value=0.0,
                 max_value=100.0,
+                step=1.0,
                 format="%.0f%%",
             )
         if "weight" in employee_allocations.columns:
@@ -1315,10 +1316,11 @@ def _render_allocation_tab(
             "Process", process_labels
         )
     if "percentage" in scenario_support_filtered.columns:
-        support_column_config["percentage"] = st.column_config.ProgressColumn(
+        support_column_config["percentage"] = st.column_config.NumberColumn(
             "Allocation %",
             min_value=0.0,
             max_value=100.0,
+            step=1.0,
             format="%.0f%%",
         )
     if "weight" in scenario_support_filtered.columns:
