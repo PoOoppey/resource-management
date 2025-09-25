@@ -582,15 +582,12 @@ def render_allocations(
     elif stored_employee_uuid:
         st.session_state.pop("selected_employee_uuid", None)
 
-    st.divider()
-
     if not selected_employee_uuid:
         st.info("Select an employee in the overview table to manage allocations.")
         return
 
     employee = employee_lookup[selected_employee_uuid]
     employee_name = f"{employee.first_name} {employee.last_name}".strip()
-    st.markdown(f"### {employee_name}")
 
     role_options = {role.uuid: role.name for role in roles}
 
