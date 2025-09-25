@@ -31,9 +31,6 @@ STATIC_COLUMN_STYLE = {
     "color": "#111827",
 }
 
-st.set_page_config(page_title="Dashboard", layout="wide")
-
-
 def _default_date_range() -> tuple[date, date]:
     today = date.today()
     start = today - timedelta(days=today.weekday())
@@ -140,7 +137,7 @@ def _style_dataframe(
     return styler
 
 
-def main():
+def render() -> None:
     st.title("Dashboard")
     data = get_data()
 
@@ -303,4 +300,7 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    import streamlit as st
+
+    st.set_page_config(page_title="Dashboard", layout="wide")
+    render()
