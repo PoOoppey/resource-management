@@ -28,10 +28,6 @@ from utils.notifications import notify
 
 from uuid import uuid4
 
-st.set_page_config(page_title="Data Management", layout="wide")
-
-
-
 def _serialize_value(value: Any):
     if hasattr(value, "value"):
         return value.value
@@ -843,7 +839,7 @@ def render_expertise(
     )
 
 
-def main():
+def render() -> None:
     st.title("Data Management")
     data = get_data()
     tabs = st.tabs(
@@ -888,4 +884,7 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    import streamlit as st
+
+    st.set_page_config(page_title="Data Management", layout="wide")
+    render()

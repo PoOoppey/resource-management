@@ -8,9 +8,6 @@ import matplotlib
 from services.data_loader import get_data
 from services.expertise import build_expertise_dataframe
 
-st.set_page_config(page_title="Expertise Dashboard", layout="wide")
-
-
 def _format_date(value: object) -> str:
     if isinstance(value, date):
         return value.isoformat()
@@ -93,7 +90,7 @@ def _render_process_summary(filtered_df: pd.DataFrame) -> None:
     st.dataframe(process_summary, use_container_width=True)
 
 
-def main() -> None:
+def render() -> None:
     st.title("Expertise Dashboard")
     data = get_data()
 
@@ -323,5 +320,8 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    import streamlit as st
+
+    st.set_page_config(page_title="Expertise Dashboard", layout="wide")
+    render()
 

@@ -24,9 +24,6 @@ from utils.relations import (
 )
 from utils.styling import coverage_style
 
-st.set_page_config(page_title="Scenario", layout="wide")
-
-
 DIFF_COLUMN_LABEL = "Diff vs baseline"
 
 DISPLAY_DATASETS: List[Tuple[str, str]] = [
@@ -1840,7 +1837,7 @@ def _collection_for_adjustment(adjustment_type: AdjustmentType) -> str:
     raise KeyError(f"Unknown adjustment type: {adjustment_type}")
 
 
-def main():
+def render() -> None:
     st.title("Scenario Planner")
 
     data = get_data()
@@ -1949,4 +1946,7 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    import streamlit as st
+
+    st.set_page_config(page_title="Scenario", layout="wide")
+    render()
