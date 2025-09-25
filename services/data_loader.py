@@ -64,22 +64,27 @@ def _deserialize_items(key: str, payload: Iterable[Dict]):
     return [model.from_dict(item) for item in payload]
 
 
+def _resolve_data_dir(data_dir: Path | None = None) -> Path:
+    if data_dir is not None:
+        return data_dir
+    return Path(__file__).resolve().parents[1] / "data"
+
+
+def _load_datasets(data_dir: Path) -> Dict[str, Iterable]:
+    datasets: Dict[str, Iterable] = {}
+    for key, filename in DATA_FILES:
+        raw = _load_json(data_dir / filename)
+        datasets[key] = _deserialize_items(key, raw)
+    return datasets
+
+
 def initialize_session_state(data_dir: Path | None = None) -> None:
     """Load datasets into ``st.session_state`` on first app load."""
 
     if "data" in st.session_state:
         return
 
-    if data_dir is None:
-        data_dir = Path(__file__).resolve().parents[1] / "data"
-
-    datasets: Dict[str, Iterable] = {}
-    for key, filename in DATA_FILES:
-        raw = _load_json(data_dir / filename)
-        datasets[key] = _deserialize_items(key, raw)
-
-    st.session_state.data = datasets
-    st.session_state.jira_cache: Dict[str, Iterable[JiraCount]] = {}
+    refresh_data(data_dir=data_dir)
 
 
 def get_data() -> Dict[str, Iterable]:
@@ -90,6 +95,14 @@ def get_data() -> Dict[str, Iterable]:
 def update_data(key: str, items: Iterable) -> None:
     initialize_session_state()
     st.session_state.data[key] = items
+
+
+def refresh_data(data_dir: Path | None = None) -> None:
+    """Force reloading of datasets into ``st.session_state``."""
+
+    resolved_dir = _resolve_data_dir(data_dir)
+    st.session_state.data = _load_datasets(resolved_dir)
+    st.session_state.jira_cache = {}
 
 
 def get_jira_counts(process_uuid: str) -> Iterable[JiraCount]:

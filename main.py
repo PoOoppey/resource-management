@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import streamlit as st
 
-from services.data_loader import initialize_session_state
+from services.data_loader import initialize_session_state, refresh_data
 from sections import (
     coverage_dashboard,
     data_management,
@@ -23,6 +23,9 @@ def main() -> None:
     initialize_session_state()
 
     st.sidebar.title("Navigation")
+    if st.sidebar.button("Refresh data", help="Reload the datasets from disk."):
+        refresh_data()
+        st.sidebar.success("Data reloaded from source files.")
     selected_label = st.sidebar.selectbox(
         "Select a view",
         options=list(SECTIONS.keys()),
