@@ -1636,15 +1636,33 @@ def _build_coverage_result(
             merged[column] = 0.0
         merged[column] = pd.to_numeric(merged[column], errors="coerce").fillna(0.0)
 
+    aggregation_map = {
+        "Required (Baseline)": "max",
+        "Coverage (Baseline)": "sum",
+        "Required (Scenario)": "max",
+        "Coverage (Scenario)": "sum",
+    }
+
     if display_columns:
         aggregated = (
             merged.groupby(display_columns, dropna=False)[numeric_columns]
-            .sum()
+            .agg(aggregation_map)
             .reset_index()
         )
         aggregated = aggregated.sort_values(by=display_columns).reset_index(drop=True)
     else:
-        aggregated = pd.DataFrame([merged[numeric_columns].sum().to_dict()])
+        aggregated = pd.DataFrame(
+            [
+                {
+                    column: (
+                        merged[column].max()
+                        if column.startswith("Required")
+                        else merged[column].sum()
+                    )
+                    for column in numeric_columns
+                }
+            ]
+        )
 
     rows: List[Dict[str, object]] = []
     for _, row in aggregated.iterrows():
