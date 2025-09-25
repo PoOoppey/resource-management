@@ -197,7 +197,6 @@ def main():
                 st.empty()
 
         secondary_row = st.columns([0.8, 1.8, 0.8])
-        selected_display_labels: list[str] = []
         with secondary_row[0]:
             segmented = st.segmented_control(
                 "Group by",
