@@ -127,6 +127,7 @@ def _smart_editor(
     number_columns: Optional[Dict[str, Dict[str, Any]]] = None,
     percentage_columns: Optional[Sequence[str]] = None,
     list_columns: Optional[Sequence[str]] = None,
+    percentage_use_progress_bar: bool = True,
     multiselect_options: Optional[Dict[str, Dict[str, str]]] = None,
     uuid_prefix: Optional[str] = None,
     labeler: Optional[Callable[[Dict[str, Any]], str]] = None,
@@ -231,20 +232,31 @@ def _smart_editor(
                 format_func=_make_formatter(multiselect_options[column]),
             )
         elif percentage_columns and column in percentage_columns:
-            min_value = 0.0
-            max_value = 100.0
-            format_str = "%.0f%%"
+            default_config: Dict[str, Any] = {
+                "min_value": 0.0,
+                "max_value": 100.0,
+                "step": 1.0,
+                "format": "%.0f%%",
+            }
+            number_config: Dict[str, Any] = {}
             if number_columns and column in number_columns:
                 number_config = number_columns[column]
-                min_value = number_config.get("min_value", min_value)
-                max_value = number_config.get("max_value", max_value)
-                format_str = number_config.get("format", format_str)
-            column_config[column] = st.column_config.ProgressColumn(
-                label,
-                min_value=min_value,
-                max_value=max_value,
-                format=format_str,
-            )
+            config = {**default_config, **number_config}
+            if percentage_use_progress_bar:
+                column_config[column] = st.column_config.ProgressColumn(
+                    label,
+                    min_value=config.get("min_value", 0.0),
+                    max_value=config.get("max_value", 100.0),
+                    format=config.get("format", "%.0f%%"),
+                )
+            else:
+                column_config[column] = st.column_config.NumberColumn(
+                    label,
+                    min_value=config.get("min_value", 0.0),
+                    max_value=config.get("max_value", 100.0),
+                    step=config.get("step", 1.0),
+                    format=config.get("format", "%.0f%%"),
+                )
         elif select_options and column in select_options:
             options = list(select_options[column].keys())
 
@@ -656,6 +668,7 @@ def render_allocations(
                 "weight": {"min_value": 0.0, "step": 0.1},
             },
             percentage_columns=["percentage"],
+            percentage_use_progress_bar=False,
             uuid_prefix="alloc",
             labeler=lambda record: role_options.get(
                 record.get("role_uuid"), record.get("uuid", "")
@@ -731,6 +744,7 @@ def render_allocations(
                 "weight": {"min_value": 0.0, "step": 0.1},
             },
             percentage_columns=["percentage"],
+            percentage_use_progress_bar=False,
             uuid_prefix="supp",
             labeler=lambda record: process_options.get(
                 record.get("process_uuid"), record.get("uuid", "")

@@ -1089,15 +1089,22 @@ def _render_allocation_tab(
 
     with allocation_tab:
         allocation_display_df = employee_allocations.copy()
-        has_uuid_column = "uuid" in allocation_display_df.columns
-        if has_uuid_column:
-            allocation_display_df = allocation_display_df.set_index("uuid")
+        if "uuid" in allocation_display_df.columns:
+            allocation_display_df["uuid"] = allocation_display_df["uuid"].apply(
+                _stringify_nullable
+            )
         if "percentage" in allocation_display_df.columns:
             allocation_display_df["percentage"] = allocation_display_df[
                 "percentage"
             ].apply(lambda value: None if _is_missing(value) else float(value) * 100)
 
         allocation_column_config: Dict[str, Any] = {}
+        if "uuid" in allocation_display_df.columns:
+            allocation_column_config["uuid"] = st.column_config.TextColumn(
+                "UUID",
+                disabled=True,
+                help="Automatically generated when you add a new allocation.",
+            )
         if "employee_uuid" in employee_allocations.columns:
             allocation_column_config["employee_uuid"] = _make_selectbox_column(
                 "Employee",
@@ -1128,11 +1135,6 @@ def _render_allocation_tab(
             column_config=allocation_column_config or None,
             key=f"scenario_allocations_editor_{scenario.uuid}_{selected_employee}",
         )
-
-        if has_uuid_column and "uuid" not in allocation_editor_df.columns:
-            allocation_editor_df = allocation_editor_df.reset_index().rename(
-                columns={"index": "uuid"}
-            )
 
         removed_allocations = pd.DataFrame()
         if not removed_df.empty:
@@ -1282,6 +1284,10 @@ def _render_allocation_tab(
     )
 
     support_display_df = scenario_support_filtered.copy()
+    if "uuid" in support_display_df.columns:
+        support_display_df["uuid"] = support_display_df["uuid"].apply(
+            _stringify_nullable
+        )
     if support_display_df.empty:
         support_display_df = pd.DataFrame(columns=list(support_base_columns) + ["Status"])
     else:
@@ -1307,6 +1313,12 @@ def _render_allocation_tab(
         support_display_df["Status"] = "Active"
 
     support_column_config: Dict[str, Any] = {}
+    if "uuid" in support_display_df.columns:
+        support_column_config["uuid"] = st.column_config.TextColumn(
+            "UUID",
+            disabled=True,
+            help="Automatically generated when you add a new support allocation.",
+        )
     if "allocation_uuid" in scenario_support_filtered.columns:
         support_column_config["allocation_uuid"] = _make_selectbox_column(
             "Role allocation", allocation_option_map
@@ -1331,9 +1343,6 @@ def _render_allocation_tab(
 
     with support_tab:
         st.caption("Support allocations linked to the selected employee")
-        support_has_uuid = "uuid" in support_display_df.columns
-        if support_has_uuid:
-            support_display_df = support_display_df.set_index("uuid")
         support_editor_df = st.data_editor(
             support_display_df,
             num_rows="dynamic",
@@ -1342,11 +1351,6 @@ def _render_allocation_tab(
             column_config=support_column_config or None,
             key=f"scenario_support_editor_{scenario.uuid}_{selected_employee}",
         )
-
-        if support_has_uuid and "uuid" not in support_editor_df.columns:
-            support_editor_df = support_editor_df.reset_index().rename(
-                columns={"index": "uuid"}
-            )
 
         if st.button(
             "Save support allocation changes",
