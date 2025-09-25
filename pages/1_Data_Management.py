@@ -198,11 +198,18 @@ def _smart_editor(
     hidden_columns = set(hide_columns or [])
 
     has_uuid = "uuid" in df.columns and "uuid" in field_order
-    if has_uuid:
-        df = df.set_index("uuid")
 
     for column in df.columns:
         if column in hidden_columns:
+            continue
+        if has_uuid and column == "uuid":
+            label = column_labels.get(column, "UUID")
+            column_config[column] = st.column_config.TextColumn(
+                label,
+                disabled=True,
+                help="Automatically generated when you add a new row.",
+            )
+            column_order.append(column)
             continue
         label = column_labels.get(column, column.replace("_", " ").title())
         if multiselect_options and column in multiselect_options:
@@ -269,10 +276,7 @@ def _smart_editor(
         key=editor_key,
     )
 
-    if has_uuid:
-        edited_df = edited_df.reset_index().rename(columns={"index": "uuid"})
-    else:
-        edited_df = edited_df.copy()
+    edited_df = edited_df.copy()
 
     if percentage_columns:
         for column in percentage_columns:
