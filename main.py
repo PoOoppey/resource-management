@@ -23,19 +23,12 @@ def main() -> None:
     initialize_session_state()
 
     st.sidebar.title("Navigation")
-    selected_label = st.sidebar.radio(
+    selected_label = st.sidebar.selectbox(
         "Select a view",
         options=list(SECTIONS.keys()),
         index=0,
         help="Switch between the data management tools, coverage analytics, scenarios, and expertise overview.",
     )
-
-    st.title("Resource Allocation Dashboard")
-    st.write(
-        "Use the navigation sidebar to manage data, explore coverage dashboards, and evaluate scenarios."
-    )
-    st.caption("Data is loaded from local JSON fixtures on startup.")
-
     render_section = SECTIONS[selected_label]
     render_section()
 
