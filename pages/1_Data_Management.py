@@ -582,7 +582,7 @@ def render_allocations(
     elif stored_employee_uuid:
         st.session_state.pop("selected_employee_uuid", None)
 
-    if overview_df is not None and not overview_df.empty():
+    if overview_df is not None and not overview_df.empty:
         selection_labels: List[Tuple[str, str]] = []
         seen_labels: set[str] = set()
         for identifier in overview_df.index:
