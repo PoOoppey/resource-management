@@ -24,8 +24,8 @@ class RoleType(str, Enum):
 
 
 class SupportStatus(str, Enum):
-    SUPPORTER = "SUPPORTER"
-    TBD = "TBD"
+    SUPPORTED = "SUPPORTED"
+    TO_BE_DEFINED = "TO_BE_DEFINED"
     PARTIALLY_SUPPORTED = "PARTIALLY_SUPPORTED"
 
 
@@ -105,7 +105,7 @@ class Process:
     description: str
     apps_related: List[str] = field(default_factory=list)
     process_related: List[str] = field(default_factory=list)
-    support_status: SupportStatus = SupportStatus.TBD
+    support_status: SupportStatus = SupportStatus.TO_BE_DEFINED
 
     @classmethod
     def from_dict(cls, raw: Dict) -> "Process":

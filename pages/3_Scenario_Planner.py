@@ -7,7 +7,13 @@ from uuid import uuid4
 import pandas as pd
 import streamlit as st
 
-from models import AdjustmentType, RoleType, Scenario, ScenarioAdjustment
+from models import (
+    AdjustmentType,
+    RoleType,
+    Scenario,
+    ScenarioAdjustment,
+    SupportStatus,
+)
 from services.coverage import compute_theoretical_coverage
 from services.data_loader import get_data, update_data
 from services.scenario import apply_scenario
@@ -38,6 +44,10 @@ REQUIRED_COLUMN_STYLE = {
     "font-style": "italic",
     "color": "#111827",
     "font-weight": "600",
+}
+
+SUPPORT_STATUS_OPTIONS = {
+    item.value: item.value.title().replace("_", " ") for item in SupportStatus
 }
 
 
@@ -828,30 +838,25 @@ def _summarize_employee_allocations(
                 )
             )
 
+        detail_text = "; ".join(details_parts) if details_parts else "—"
+        diff_summary = status if detail_text == "—" else f"{status}: {detail_text}"
+
         summary_rows.append(
             {
                 "Employee": employee_label or employee_id or "—",
-                "Baseline allocations": baseline_roles,
-                "Baseline support allocations": baseline_support_summary,
-                "Baseline utilisation": baseline_total,
                 "Scenario allocations": scenario_roles,
                 "Scenario support allocations": scenario_support_summary,
                 "Scenario utilisation": scenario_total,
-                "Status": status,
-                "Details": "; ".join(details_parts) if details_parts else "—",
+                DIFF_COLUMN_LABEL: diff_summary,
             }
         )
 
     columns = [
         "Employee",
-        "Baseline allocations",
-        "Baseline support allocations",
-        "Baseline utilisation",
         "Scenario allocations",
         "Scenario support allocations",
         "Scenario utilisation",
-        "Status",
-        "Details",
+        DIFF_COLUMN_LABEL,
     ]
 
     if not summary_rows:
@@ -941,16 +946,20 @@ def _render_allocation_tab(
     if summary_table.empty:
         st.info("No allocation data available for the selected criteria.")
     else:
+        if "Scenario utilisation" in summary_table.columns:
+            summary_table["Scenario utilisation"] = pd.to_numeric(
+                summary_table["Scenario utilisation"], errors="coerce"
+            )
         st.dataframe(
             summary_table,
             use_container_width=True,
             hide_index=True,
             column_config={
-                "Baseline utilisation": st.column_config.ProgressColumn(
-                    "Baseline utilisation", min_value=0.0, max_value=1.0, format="{:.0%}"
-                ),
                 "Scenario utilisation": st.column_config.ProgressColumn(
                     "Scenario utilisation", min_value=0.0, max_value=1.0, format="{:.0%}"
+                ),
+                DIFF_COLUMN_LABEL: st.column_config.TextColumn(
+                    DIFF_COLUMN_LABEL, disabled=True
                 ),
             },
         )
@@ -1011,117 +1020,124 @@ def _render_allocation_tab(
     else:
         employee_allocations = employee_allocations.reindex(columns=base_columns)
 
-    allocation_display_df = employee_allocations.copy()
-    if "percentage" in allocation_display_df.columns:
-        allocation_display_df["percentage"] = allocation_display_df["percentage"].apply(
-            lambda value: None if _is_missing(value) else float(value) * 100
+    allocation_tab, support_tab = st.tabs([
+        "Role allocations",
+        "Support allocations",
+    ])
+
+    with allocation_tab:
+        allocation_display_df = employee_allocations.copy()
+        if "percentage" in allocation_display_df.columns:
+            allocation_display_df["percentage"] = allocation_display_df[
+                "percentage"
+            ].apply(lambda value: None if _is_missing(value) else float(value) * 100)
+
+        allocation_column_config: Dict[str, Any] = {}
+        if "uuid" in employee_allocations.columns:
+            allocation_column_config["uuid"] = st.column_config.TextColumn(
+                "UUID", disabled=True
+            )
+        if "employee_uuid" in employee_allocations.columns:
+            allocation_column_config["employee_uuid"] = _make_selectbox_column(
+                "Employee",
+                {selected_employee: _label_for_employee(selected_employee)},
+            )
+        if "role_uuid" in employee_allocations.columns:
+            allocation_column_config["role_uuid"] = _make_selectbox_column(
+                "Role", role_labels
+            )
+        if "percentage" in employee_allocations.columns:
+            allocation_column_config["percentage"] = st.column_config.NumberColumn(
+                "Allocation %",
+                min_value=0.0,
+                max_value=100.0,
+                step=5.0,
+                format="%.0f%%",
+            )
+        if "weight" in employee_allocations.columns:
+            allocation_column_config["weight"] = st.column_config.NumberColumn(
+                "Weight", min_value=0.0, step=0.1
+            )
+
+        allocation_editor_df = st.data_editor(
+            allocation_display_df,
+            num_rows="dynamic",
+            use_container_width=True,
+            hide_index=True,
+            column_config=allocation_column_config or None,
+            key=f"scenario_allocations_editor_{scenario.uuid}_{selected_employee}",
         )
 
-    allocation_column_config: Dict[str, Any] = {}
-    if "uuid" in employee_allocations.columns:
-        allocation_column_config["uuid"] = st.column_config.TextColumn(
-            "UUID", disabled=True
-        )
-    if "employee_uuid" in employee_allocations.columns:
-        allocation_column_config["employee_uuid"] = _make_selectbox_column(
-            "Employee",
-            {selected_employee: _label_for_employee(selected_employee)},
-        )
-    if "role_uuid" in employee_allocations.columns:
-        allocation_column_config["role_uuid"] = _make_selectbox_column(
-            "Role", role_labels
-        )
-    if "percentage" in employee_allocations.columns:
-        allocation_column_config["percentage"] = st.column_config.NumberColumn(
-            "Allocation %",
-            min_value=0.0,
-            max_value=100.0,
-            step=5.0,
-            format="%.0f%%",
-        )
-    if "weight" in employee_allocations.columns:
-        allocation_column_config["weight"] = st.column_config.NumberColumn(
-            "Weight", min_value=0.0, step=0.1
-        )
-
-    st.markdown("##### Allocation details")
-    allocation_editor_df = st.data_editor(
-        allocation_display_df,
-        num_rows="dynamic",
-        use_container_width=True,
-        hide_index=True,
-        column_config=allocation_column_config or None,
-        key=f"scenario_allocations_editor_{scenario.uuid}_{selected_employee}",
-    )
-
-    removed_allocations = pd.DataFrame()
-    if not removed_df.empty:
-        removed_allocations = removed_df.copy()
-        if "employee_uuid" in removed_allocations.columns:
-            removed_allocations["employee_uuid"] = removed_allocations[
-                "employee_uuid"
-            ].apply(_stringify_nullable)
-            removed_allocations = removed_allocations[
-                removed_allocations["employee_uuid"] == selected_employee
-            ]
-        if not removed_allocations.empty:
-            preview = removed_allocations.copy()
-            if "role_uuid" in preview.columns:
-                preview["Role"] = preview["role_uuid"].apply(
-                    lambda value: role_labels.get(value, value) if value else "—"
+        removed_allocations = pd.DataFrame()
+        if not removed_df.empty:
+            removed_allocations = removed_df.copy()
+            if "employee_uuid" in removed_allocations.columns:
+                removed_allocations["employee_uuid"] = removed_allocations[
+                    "employee_uuid"
+                ].apply(_stringify_nullable)
+                removed_allocations = removed_allocations[
+                    removed_allocations["employee_uuid"] == selected_employee
+                ]
+            if not removed_allocations.empty:
+                preview = removed_allocations.copy()
+                if "role_uuid" in preview.columns:
+                    preview["Role"] = preview["role_uuid"].apply(
+                        lambda value: role_labels.get(value, value) if value else "—"
+                    )
+                if "percentage" in preview.columns:
+                    preview["Allocation %"] = preview["percentage"].apply(
+                        lambda value: "—"
+                        if _is_missing(value)
+                        else f"{float(value) * 100:.0f}%"
+                    )
+                st.caption("Removed allocations in this scenario")
+                st.dataframe(
+                    preview[
+                        [col for col in ["Role", "Allocation %"] if col in preview.columns]
+                    ],
+                    use_container_width=True,
+                    hide_index=True,
                 )
-            if "percentage" in preview.columns:
-                preview["Allocation %"] = preview["percentage"].apply(
-                    lambda value: "—"
-                    if _is_missing(value)
-                    else f"{float(value) * 100:.0f}%"
+
+        if st.button(
+            "Save allocation changes", key=f"save_allocations_{scenario.uuid}"
+        ):
+            edited_df = allocation_editor_df.copy().reindex(columns=base_columns)
+            if "percentage" in edited_df.columns:
+                edited_df["percentage"] = edited_df["percentage"].apply(
+                    lambda value: None if _is_missing(value) else float(value) / 100
                 )
-            st.caption("Removed allocations in this scenario")
-            st.dataframe(
-                preview[[col for col in ["Role", "Allocation %"] if col in preview.columns]],
-                use_container_width=True,
-                hide_index=True,
+            if "employee_uuid" in edited_df.columns:
+                edited_df["employee_uuid"] = edited_df["employee_uuid"].apply(
+                    lambda value: selected_employee
+                    if not value or not str(value).strip()
+                    else _stringify_nullable(value)
+                )
+
+            other_allocations = scenario_allocations.copy()
+            if "employee_uuid" in other_allocations.columns:
+                other_allocations = other_allocations[
+                    other_allocations["employee_uuid"] != selected_employee
+                ]
+            if not other_allocations.empty:
+                other_allocations = other_allocations.reindex(columns=base_columns)
+
+            combined_allocations = pd.concat(
+                [other_allocations, edited_df], ignore_index=True, sort=False
             )
+            combined_allocations = combined_allocations.reindex(columns=base_columns)
 
-    if st.button("Save allocation changes", key=f"save_allocations_{scenario.uuid}"):
-        edited_df = allocation_editor_df.copy().reindex(columns=base_columns)
-        if "percentage" in edited_df.columns:
-            edited_df["percentage"] = edited_df["percentage"].apply(
-                lambda value: None if _is_missing(value) else float(value) / 100
+            new_adjustments = _calculate_dataset_adjustments(
+                dataset,
+                baseline_df,
+                combined_allocations,
+                baseline_data,
+                modified_data,
             )
-        if "employee_uuid" in edited_df.columns:
-            edited_df["employee_uuid"] = edited_df["employee_uuid"].apply(
-                lambda value: selected_employee
-                if not value or not str(value).strip()
-                else _stringify_nullable(value)
-            )
-
-        other_allocations = scenario_allocations.copy()
-        if "employee_uuid" in other_allocations.columns:
-            other_allocations = other_allocations[
-                other_allocations["employee_uuid"] != selected_employee
-            ]
-        if not other_allocations.empty:
-            other_allocations = other_allocations.reindex(columns=base_columns)
-
-        combined_allocations = pd.concat(
-            [other_allocations, edited_df], ignore_index=True, sort=False
-        )
-        combined_allocations = combined_allocations.reindex(columns=base_columns)
-
-        new_adjustments = _calculate_dataset_adjustments(
-            dataset,
-            baseline_df,
-            combined_allocations,
-            baseline_data,
-            modified_data,
-        )
-        _merge_adjustments(scenario, dataset, new_adjustments)
-        update_data("scenarios", baseline_data["scenarios"])
-        st.success("Scenario allocations saved.")
-        st.rerun()
-
-    st.markdown("#### Support allocations")
+            _merge_adjustments(scenario, dataset, new_adjustments)
+            update_data("scenarios", baseline_data["scenarios"])
+            st.success("Scenario allocations saved.")
+            st.rerun()
 
     support_base_columns = list(
         dict.fromkeys(list(scenario_support_df.columns) + list(baseline_support_df.columns))
@@ -1236,61 +1252,62 @@ def _render_allocation_tab(
         )
     support_column_config["Status"] = st.column_config.TextColumn("Status", disabled=True)
 
-    st.caption("Support allocations linked to the selected employee")
-    support_editor_df = st.data_editor(
-        support_display_df,
-        num_rows="dynamic",
-        use_container_width=True,
-        hide_index=True,
-        column_config=support_column_config or None,
-        key=f"scenario_support_editor_{scenario.uuid}_{selected_employee}",
-    )
+    with support_tab:
+        st.caption("Support allocations linked to the selected employee")
+        support_editor_df = st.data_editor(
+            support_display_df,
+            num_rows="dynamic",
+            use_container_width=True,
+            hide_index=True,
+            column_config=support_column_config or None,
+            key=f"scenario_support_editor_{scenario.uuid}_{selected_employee}",
+        )
 
-    if st.button(
-        "Save support allocation changes",
-        key=f"save_support_{scenario.uuid}_{selected_employee}",
-    ):
-        edited_support_df = support_editor_df.copy()
-        if "Status" in edited_support_df.columns:
-            removed_mask = edited_support_df["Status"] == "Removed"
-            if removed_mask.any():
-                edited_support_df = edited_support_df.loc[~removed_mask].copy()
-            edited_support_df = edited_support_df.drop(columns=["Status"])
-        edited_support_df = edited_support_df.reindex(columns=support_base_columns)
-        if "percentage" in edited_support_df.columns:
-            edited_support_df["percentage"] = edited_support_df["percentage"].apply(
-                lambda value: None if _is_missing(value) else float(value) / 100
-            )
-        for column in ["allocation_uuid", "process_uuid"]:
-            if column in edited_support_df.columns:
-                edited_support_df[column] = edited_support_df[column].apply(
-                    _stringify_nullable
+        if st.button(
+            "Save support allocation changes",
+            key=f"save_support_{scenario.uuid}_{selected_employee}",
+        ):
+            edited_support_df = support_editor_df.copy()
+            if "Status" in edited_support_df.columns:
+                removed_mask = edited_support_df["Status"] == "Removed"
+                if removed_mask.any():
+                    edited_support_df = edited_support_df.loc[~removed_mask].copy()
+                edited_support_df = edited_support_df.drop(columns=["Status"])
+            edited_support_df = edited_support_df.reindex(columns=support_base_columns)
+            if "percentage" in edited_support_df.columns:
+                edited_support_df["percentage"] = edited_support_df["percentage"].apply(
+                    lambda value: None if _is_missing(value) else float(value) / 100
                 )
+            for column in ["allocation_uuid", "process_uuid"]:
+                if column in edited_support_df.columns:
+                    edited_support_df[column] = edited_support_df[column].apply(
+                        _stringify_nullable
+                    )
 
-        other_support = scenario_support.copy()
-        if "allocation_uuid" in other_support.columns:
-            other_support = other_support[
-                ~other_support["allocation_uuid"].isin(relevant_allocation_ids)
-            ]
-        if not other_support.empty:
-            other_support = other_support.reindex(columns=support_base_columns)
+            other_support = scenario_support.copy()
+            if "allocation_uuid" in other_support.columns:
+                other_support = other_support[
+                    ~other_support["allocation_uuid"].isin(relevant_allocation_ids)
+                ]
+            if not other_support.empty:
+                other_support = other_support.reindex(columns=support_base_columns)
 
-        combined_support = pd.concat(
-            [other_support, edited_support_df], ignore_index=True, sort=False
-        )
-        combined_support = combined_support.reindex(columns=support_base_columns)
+            combined_support = pd.concat(
+                [other_support, edited_support_df], ignore_index=True, sort=False
+            )
+            combined_support = combined_support.reindex(columns=support_base_columns)
 
-        new_adjustments = _calculate_dataset_adjustments(
-            support_dataset,
-            baseline_support_df,
-            combined_support,
-            baseline_data,
-            modified_data,
-        )
-        _merge_adjustments(scenario, support_dataset, new_adjustments)
-        update_data("scenarios", baseline_data["scenarios"])
-        st.success("Scenario support allocations saved.")
-        st.rerun()
+            new_adjustments = _calculate_dataset_adjustments(
+                support_dataset,
+                baseline_support_df,
+                combined_support,
+                baseline_data,
+                modified_data,
+            )
+            _merge_adjustments(scenario, support_dataset, new_adjustments)
+            update_data("scenarios", baseline_data["scenarios"])
+            st.success("Scenario support allocations saved.")
+            st.rerun()
 
 
 def _render_generic_dataset_tab(
@@ -1369,6 +1386,10 @@ def _render_generic_dataset_tab(
     if dataset == "processes":
         app_options = label_maps.get("apps", {})
         process_options = label_maps.get("processes", {})
+        if "support_status" in display_df.columns:
+            column_config["support_status"] = _make_selectbox_column(
+                "Support status", SUPPORT_STATUS_OPTIONS
+            )
         if "apps_related" in display_df.columns:
             column_config["apps_related"] = _make_multiselect_column(
                 "Apps", app_options
@@ -1756,7 +1777,7 @@ def main():
     st.subheader("Scenario result")
     coverage_result = _build_coverage_result(baseline_coverage, scenario_coverage)
     styled_coverage = _style_coverage_result(coverage_result)
-    st.dataframe(styled_coverage, use_container_width=True)
+    st.dataframe(styled_coverage, use_container_width=True, hide_index=True)
 
 
 if __name__ == "__main__":
