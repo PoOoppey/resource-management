@@ -6,7 +6,7 @@
     "description": "Handle email tickets",
     "apps_related": ["app-mail"],
     "process_related": [],
-    "support_status": "SUPPORTER"
+    "support_status": "SUPPORTED"
   },
   {
     "uuid": "process-phone",

@@ -125,6 +125,7 @@ def _smart_editor(
     column_labels: Dict[str, str],
     select_options: Optional[Dict[str, Dict[str, str]]] = None,
     number_columns: Optional[Dict[str, Dict[str, Any]]] = None,
+    percentage_columns: Optional[Sequence[str]] = None,
     list_columns: Optional[Sequence[str]] = None,
     multiselect_options: Optional[Dict[str, Dict[str, str]]] = None,
     uuid_prefix: Optional[str] = None,
@@ -141,6 +142,41 @@ def _smart_editor(
     df = _ensure_dataframe(df, field_order)
 
     date_columns = list(date_columns or [])
+    percentage_columns = [
+        column for column in (percentage_columns or []) if column in df.columns
+    ]
+
+    def _to_percentage_display(value: Any) -> Optional[float]:
+        if value in (None, ""):
+            return None
+        try:
+            if pd.isna(value):
+                return None
+        except Exception:
+            pass
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            return None
+        return numeric * 100
+
+    def _to_fraction(value: Any) -> Optional[float]:
+        if value in (None, ""):
+            return None
+        try:
+            if pd.isna(value):
+                return None
+        except Exception:
+            pass
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            return None
+        return numeric / 100
+
+    if percentage_columns:
+        for column in percentage_columns:
+            df[column] = df[column].apply(_to_percentage_display)
 
     if list_columns:
         for column in list_columns:
@@ -210,7 +246,7 @@ def _smart_editor(
     editor_key = key or f"editor_{dataset_key}"
     edited_df = st.data_editor(
         df,
-        hide_index=has_uuid,
+        hide_index=True,
         num_rows="dynamic",
         column_config=column_config,
         column_order=column_order,
@@ -222,6 +258,11 @@ def _smart_editor(
         edited_df = edited_df.reset_index().rename(columns={"index": "uuid"})
     else:
         edited_df = edited_df.copy()
+
+    if percentage_columns:
+        for column in percentage_columns:
+            if column in edited_df.columns:
+                edited_df[column] = edited_df[column].apply(_to_fraction)
 
     if list_columns:
         for column in list_columns:
@@ -473,6 +514,11 @@ def render_allocations(
         )
         overview_df.index.name = "employee_uuid"
 
+    if not overview_df.empty and "Utilization" in overview_df.columns:
+        overview_df["Utilization"] = pd.to_numeric(
+            overview_df["Utilization"], errors="coerce"
+        )
+
     st.caption("Select an employee below to manage role and support allocations.")
     disabled_columns = list(overview_df.columns)
     st.data_editor(
@@ -577,8 +623,10 @@ def render_allocations(
     employee_name = f"{employee.first_name} {employee.last_name}".strip()
     st.markdown(f"### {employee_name}")
 
-    employee_allocations = allocations_by_employee.get(selected_employee_uuid, [])
     role_options = {role.uuid: role.name for role in roles}
+
+    employee_allocations = allocations_by_employee.get(selected_employee_uuid, [])
+    allocation_tab, support_tab = st.tabs(["Role allocations", "Support allocations"])
 
     def save_employee_allocations(updated_subset: List[Allocation]) -> None:
         remaining_allocations = [
@@ -603,90 +651,112 @@ def render_allocations(
                 "info",
             )
 
-    allocation_records = _smart_editor(
-        items=employee_allocations,
-        model_cls=Allocation,
-        dataset_key=f"allocations_{selected_employee_uuid}",
-        save_label="Save allocations",
-        column_labels={
-            "role_uuid": "Role",
-            "percentage": "Allocation %",
-            "weight": "Weight",
-        },
-        select_options={"role_uuid": role_options},
-        number_columns={
-            "percentage": {"min_value": 0.0, "max_value": 1.0, "step": 0.05, "format": "%.0f%%"},
-            "weight": {"min_value": 0.0, "step": 0.1},
-        },
-        uuid_prefix="alloc",
-        labeler=lambda record: role_options.get(record.get("role_uuid"), record.get("uuid", "")),
-        extra_fixed_values={"employee_uuid": selected_employee_uuid},
-        hide_columns=["employee_uuid"],
-        key=f"alloc_editor_{selected_employee_uuid}",
-        entity_label=f"Allocations for {employee_name}",
-        on_save=save_employee_allocations,
-    )
+    allocation_records: List[Dict[str, Any]] = []
+    with allocation_tab:
+        allocation_records = _smart_editor(
+            items=employee_allocations,
+            model_cls=Allocation,
+            dataset_key=f"allocations_{selected_employee_uuid}",
+            save_label="Save allocations",
+            column_labels={
+                "role_uuid": "Role",
+                "percentage": "Allocation %",
+                "weight": "Weight",
+            },
+            select_options={"role_uuid": role_options},
+            number_columns={
+                "percentage": {
+                    "min_value": 0.0,
+                    "max_value": 100.0,
+                    "step": 5.0,
+                    "format": "%.0f%%",
+                },
+                "weight": {"min_value": 0.0, "step": 0.1},
+            },
+            percentage_columns=["percentage"],
+            uuid_prefix="alloc",
+            labeler=lambda record: role_options.get(
+                record.get("role_uuid"), record.get("uuid", "")
+            ),
+            extra_fixed_values={"employee_uuid": selected_employee_uuid},
+            hide_columns=["employee_uuid"],
+            key=f"alloc_editor_{selected_employee_uuid}",
+            entity_label=f"Allocations for {employee_name}",
+            on_save=save_employee_allocations,
+        )
+
     employee_allocations = [Allocation.from_dict(record) for record in allocation_records]
 
     support_role_allocations = [
         allocation
         for allocation in employee_allocations
-        if role_lookup.get(allocation.role_uuid) and role_lookup[allocation.role_uuid].type == RoleType.SUPPORT
+        if role_lookup.get(allocation.role_uuid)
+        and role_lookup[allocation.role_uuid].type == RoleType.SUPPORT
     ]
 
-    if not support_role_allocations:
-        st.info("No support roles allocated for this employee.")
-        return
+    with support_tab:
+        if not support_role_allocations:
+            st.info("No support roles allocated for this employee.")
+            return
 
-    st.markdown("#### Support allocations")
-    support_items = [
-        support
-        for support in support_allocations
-        if support.allocation_uuid in {allocation.uuid for allocation in support_role_allocations}
-    ]
-
-    allocation_select_options = {
-        allocation.uuid: f"{role_lookup[allocation.role_uuid].name} ({allocation.percentage * 100:.0f}%)"
-        for allocation in support_role_allocations
-    }
-    process_options = {process.uuid: process.name for process in processes}
-
-    def save_support(updated_subset: List[SupportAllocation]) -> None:
-        managed_allocation_ids = {allocation.uuid for allocation in support_role_allocations}
-        remaining_support = [
+        support_items = [
             support
             for support in support_allocations
-            if support.allocation_uuid not in managed_allocation_ids
+            if support.allocation_uuid in {
+                allocation.uuid for allocation in support_role_allocations
+            }
         ]
-        merged_support = remaining_support + updated_subset
-        update_data("support_allocations", merged_support)
-        support_allocations[:] = merged_support
 
-    _smart_editor(
-        items=support_items,
-        model_cls=SupportAllocation,
-        dataset_key=f"support_{selected_employee_uuid}",
-        save_label="Save support allocations",
-        column_labels={
-            "allocation_uuid": "Role allocation",
-            "process_uuid": "Process",
-            "percentage": "Allocation %",
-            "weight": "Weight",
-        },
-        select_options={
-            "allocation_uuid": allocation_select_options,
-            "process_uuid": process_options,
-        },
-        number_columns={
-            "percentage": {"min_value": 0.0, "max_value": 1.0, "step": 0.05, "format": "%.0f%%"},
-            "weight": {"min_value": 0.0, "step": 0.1},
-        },
-        uuid_prefix="supp",
-        labeler=lambda record: process_options.get(record.get("process_uuid"), record.get("uuid", "")),
-        key=f"support_editor_{selected_employee_uuid}",
-        entity_label=f"Support allocations for {employee_name}",
-        on_save=save_support,
-    )
+        allocation_select_options = {
+            allocation.uuid: f"{role_lookup[allocation.role_uuid].name} ({allocation.percentage * 100:.0f}%)"
+            for allocation in support_role_allocations
+        }
+        process_options = {process.uuid: process.name for process in processes}
+
+        def save_support(updated_subset: List[SupportAllocation]) -> None:
+            managed_allocation_ids = {allocation.uuid for allocation in support_role_allocations}
+            remaining_support = [
+                support
+                for support in support_allocations
+                if support.allocation_uuid not in managed_allocation_ids
+            ]
+            merged_support = remaining_support + updated_subset
+            update_data("support_allocations", merged_support)
+            support_allocations[:] = merged_support
+
+        _smart_editor(
+            items=support_items,
+            model_cls=SupportAllocation,
+            dataset_key=f"support_{selected_employee_uuid}",
+            save_label="Save support allocations",
+            column_labels={
+                "allocation_uuid": "Role allocation",
+                "process_uuid": "Process",
+                "percentage": "Allocation %",
+                "weight": "Weight",
+            },
+            select_options={
+                "allocation_uuid": allocation_select_options,
+                "process_uuid": process_options,
+            },
+            number_columns={
+                "percentage": {
+                    "min_value": 0.0,
+                    "max_value": 100.0,
+                    "step": 5.0,
+                    "format": "%.0f%%",
+                },
+                "weight": {"min_value": 0.0, "step": 0.1},
+            },
+            percentage_columns=["percentage"],
+            uuid_prefix="supp",
+            labeler=lambda record: process_options.get(
+                record.get("process_uuid"), record.get("uuid", "")
+            ),
+            key=f"support_editor_{selected_employee_uuid}",
+            entity_label=f"Support allocations for {employee_name}",
+            on_save=save_support,
+        )
 
 
 def render_expertise(
