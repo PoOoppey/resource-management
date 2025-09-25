@@ -4,7 +4,7 @@ from datetime import date, timedelta
 
 import pandas as pd
 import streamlit as st
-
+import matplotlib
 from services.data_loader import get_data
 from services.expertise import build_expertise_dataframe
 
