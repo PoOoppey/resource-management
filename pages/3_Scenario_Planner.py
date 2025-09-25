@@ -992,7 +992,7 @@ def _render_allocation_tab(
     summary_table = summary_table.reset_index(drop=True)
     if "Utilisation" in summary_table.columns:
         summary_table["Utilisation"] = pd.to_numeric(
-            summary_table["Utilisation"], errors="coerce"
+            summary_table["Utilisation"]*100, errors="coerce"
         )
 
     overview_key = f"scenario_allocation_overview_{scenario.uuid}"
@@ -1011,7 +1011,7 @@ def _render_allocation_tab(
     column_config = {
         select_column: st.column_config.CheckboxColumn("Select"),
         "Utilisation": st.column_config.ProgressColumn(
-            "Utilisation", min_value=0.0, max_value=1.0, format="{:.0%}"
+            "Alloc %", min_value=0.0, max_value=100.0, format="%.0f%%"
         ),
         DIFF_COLUMN_LABEL: st.column_config.TextColumn(
             DIFF_COLUMN_LABEL, disabled=True

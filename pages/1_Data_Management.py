@@ -519,7 +519,7 @@ def render_allocations(
             {
                 "employee_uuid": employee.uuid,
                 "Employee": f"{employee.first_name} {employee.last_name}",
-                "Utilization": utilization,
+                "Utilization": utilization*100,
                 "Role Split": "; ".join(role_splits) if role_splits else "—",
                 "Support Details": "; ".join(support_details) if support_details else "—",
             }
@@ -552,7 +552,7 @@ def render_allocations(
         select_column: st.column_config.CheckboxColumn("Select"),
         "Employee": st.column_config.TextColumn("Employee"),
         "Utilization": st.column_config.ProgressColumn(
-            "Utilization", format="{:.0%}", min_value=0.0, max_value=1.0
+            "Allocated %", format="%.0f%%", min_value=0.0, max_value=100.0
         ),
         "Role Split": st.column_config.TextColumn("Roles"),
         "Support Details": st.column_config.TextColumn("Support work"),
