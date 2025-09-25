@@ -998,65 +998,63 @@ def _render_allocation_tab(
     overview_key = f"scenario_allocation_overview_{scenario.uuid}"
     selection_key = f"scenario_selected_employee_{scenario.uuid}"
 
-    st.data_editor(
+    select_column = "Select"
+    if not summary_table.empty:
+        summary_table.insert(0, select_column, False)
+
+    stored_employee = st.session_state.get(selection_key)
+    if stored_employee in employee_order:
+        stored_index = employee_order.index(stored_employee)
+        if stored_index < len(summary_table.index):
+            summary_table.loc[stored_index, select_column] = True
+
+    column_config = {
+        select_column: st.column_config.CheckboxColumn("Select"),
+        "Utilisation": st.column_config.ProgressColumn(
+            "Utilisation", min_value=0.0, max_value=1.0, format="{:.0%}"
+        ),
+        DIFF_COLUMN_LABEL: st.column_config.TextColumn(
+            DIFF_COLUMN_LABEL, disabled=True
+        ),
+    }
+
+    disabled_columns = [
+        column for column in summary_table.columns if column != select_column
+    ]
+
+    column_order = list(
+        dict.fromkeys([select_column] + [
+            column for column in summary_table.columns if column != select_column
+        ])
+    )
+
+    edited_overview = st.data_editor(
         summary_table,
         use_container_width=True,
         hide_index=True,
         num_rows="fixed",
-        disabled=list(summary_table.columns),
-        column_config={
-            "Utilisation": st.column_config.ProgressColumn(
-                "Utilisation", min_value=0.0, max_value=1.0, format="{:.0%}"
-            ),
-            DIFF_COLUMN_LABEL: st.column_config.TextColumn(
-                DIFF_COLUMN_LABEL, disabled=True
-            ),
-        },
+        disabled=disabled_columns,
+        column_config=column_config,
+        column_order=column_order,
         key=overview_key,
     )
 
-    def _extract_selected_rows(payload: Dict[str, Any]) -> List[int]:
-        if not isinstance(payload, dict):
-            return []
-        candidates: List[Any] = []
-        selection_info = payload.get("selection", {}) if isinstance(payload, dict) else {}
-        for key in ("rows", "row_indices"):
-            values = selection_info.get(key)
-            if values:
-                candidates = values
-                break
-        if not candidates:
-            fallback = payload.get("selected_rows")
-            if fallback:
-                candidates = fallback
-        if isinstance(candidates, dict):
-            candidates = list(candidates.keys())
-        if isinstance(candidates, set):
-            candidates = list(candidates)
-        normalized: List[int] = []
-        for value in candidates:
-            if isinstance(value, (int, float)) and not pd.isna(value):
-                normalized.append(int(value))
-            elif isinstance(value, str) and value.isdigit():
-                normalized.append(int(value))
-        return normalized
-
     selected_employee: Optional[str] = None
-    selection_state = st.session_state.get(overview_key, {})
-    selected_rows = _extract_selected_rows(selection_state)
-    if selected_rows:
-        row_position = selected_rows[0]
-        if 0 <= row_position < len(employee_order):
-            selected_employee = employee_order[row_position]
-            st.session_state[selection_key] = selected_employee
+    if not edited_overview.empty and select_column in edited_overview.columns:
+        for row_position, is_selected in enumerate(
+            edited_overview[select_column].tolist()
+        ):
+            if bool(is_selected) and row_position < len(employee_order):
+                selected_employee = employee_order[row_position]
+                break
 
-    if selected_employee is None:
-        stored_employee = st.session_state.get(selection_key)
-        if stored_employee in employee_order:
-            selected_employee = stored_employee
-        elif employee_order:
-            selected_employee = employee_order[0]
-            st.session_state[selection_key] = selected_employee
+    if selected_employee is None and stored_employee in employee_order:
+        selected_employee = stored_employee
+
+    if selected_employee in employee_order:
+        st.session_state[selection_key] = selected_employee
+    else:
+        st.session_state.pop(selection_key, None)
 
     if not selected_employee:
         st.info("Select an employee in the overview table to manage allocations.")
@@ -1091,16 +1089,15 @@ def _render_allocation_tab(
 
     with allocation_tab:
         allocation_display_df = employee_allocations.copy()
+        has_uuid_column = "uuid" in allocation_display_df.columns
+        if has_uuid_column:
+            allocation_display_df = allocation_display_df.set_index("uuid")
         if "percentage" in allocation_display_df.columns:
             allocation_display_df["percentage"] = allocation_display_df[
                 "percentage"
             ].apply(lambda value: None if _is_missing(value) else float(value) * 100)
 
         allocation_column_config: Dict[str, Any] = {}
-        if "uuid" in employee_allocations.columns:
-            allocation_column_config["uuid"] = st.column_config.TextColumn(
-                "UUID", disabled=True
-            )
         if "employee_uuid" in employee_allocations.columns:
             allocation_column_config["employee_uuid"] = _make_selectbox_column(
                 "Employee",
@@ -1111,11 +1108,10 @@ def _render_allocation_tab(
                 "Role", role_labels
             )
         if "percentage" in employee_allocations.columns:
-            allocation_column_config["percentage"] = st.column_config.NumberColumn(
+            allocation_column_config["percentage"] = st.column_config.ProgressColumn(
                 "Allocation %",
                 min_value=0.0,
                 max_value=100.0,
-                step=5.0,
                 format="%.0f%%",
             )
         if "weight" in employee_allocations.columns:
@@ -1131,6 +1127,11 @@ def _render_allocation_tab(
             column_config=allocation_column_config or None,
             key=f"scenario_allocations_editor_{scenario.uuid}_{selected_employee}",
         )
+
+        if has_uuid_column and "uuid" not in allocation_editor_df.columns:
+            allocation_editor_df = allocation_editor_df.reset_index().rename(
+                columns={"index": "uuid"}
+            )
 
         removed_allocations = pd.DataFrame()
         if not removed_df.empty:
@@ -1305,10 +1306,6 @@ def _render_allocation_tab(
         support_display_df["Status"] = "Active"
 
     support_column_config: Dict[str, Any] = {}
-    if "uuid" in scenario_support_filtered.columns:
-        support_column_config["uuid"] = st.column_config.TextColumn(
-            "UUID", disabled=True
-        )
     if "allocation_uuid" in scenario_support_filtered.columns:
         support_column_config["allocation_uuid"] = _make_selectbox_column(
             "Role allocation", allocation_option_map
@@ -1318,11 +1315,10 @@ def _render_allocation_tab(
             "Process", process_labels
         )
     if "percentage" in scenario_support_filtered.columns:
-        support_column_config["percentage"] = st.column_config.NumberColumn(
+        support_column_config["percentage"] = st.column_config.ProgressColumn(
             "Allocation %",
             min_value=0.0,
             max_value=100.0,
-            step=5.0,
             format="%.0f%%",
         )
     if "weight" in scenario_support_filtered.columns:
@@ -1333,6 +1329,9 @@ def _render_allocation_tab(
 
     with support_tab:
         st.caption("Support allocations linked to the selected employee")
+        support_has_uuid = "uuid" in support_display_df.columns
+        if support_has_uuid:
+            support_display_df = support_display_df.set_index("uuid")
         support_editor_df = st.data_editor(
             support_display_df,
             num_rows="dynamic",
@@ -1341,6 +1340,11 @@ def _render_allocation_tab(
             column_config=support_column_config or None,
             key=f"scenario_support_editor_{scenario.uuid}_{selected_employee}",
         )
+
+        if support_has_uuid and "uuid" not in support_editor_df.columns:
+            support_editor_df = support_editor_df.reset_index().rename(
+                columns={"index": "uuid"}
+            )
 
         if st.button(
             "Save support allocation changes",

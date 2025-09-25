@@ -223,6 +223,21 @@ def _smart_editor(
                 options=options,
                 format_func=_make_formatter(multiselect_options[column]),
             )
+        elif percentage_columns and column in percentage_columns:
+            min_value = 0.0
+            max_value = 100.0
+            format_str = "%.0f%%"
+            if number_columns and column in number_columns:
+                number_config = number_columns[column]
+                min_value = number_config.get("min_value", min_value)
+                max_value = number_config.get("max_value", max_value)
+                format_str = number_config.get("format", format_str)
+            column_config[column] = st.column_config.ProgressColumn(
+                label,
+                min_value=min_value,
+                max_value=max_value,
+                format=format_str,
+            )
         elif select_options and column in select_options:
             options = list(select_options[column].keys())
 
@@ -520,66 +535,63 @@ def render_allocations(
         )
 
     st.caption("Select an employee below to manage role and support allocations.")
-    disabled_columns = list(overview_df.columns)
-    st.data_editor(
-        overview_df,
+    select_column = "Select"
+    overview_display_df = overview_df.copy()
+    if not overview_display_df.empty:
+        overview_display_df.insert(0, select_column, False)
+
+    stored_employee_uuid: Optional[str] = st.session_state.get("selected_employee_uuid")
+    if stored_employee_uuid and stored_employee_uuid in overview_display_df.index:
+        overview_display_df[select_column] = overview_display_df.index == stored_employee_uuid
+
+    column_config = {
+        select_column: st.column_config.CheckboxColumn("Select"),
+        "Employee": st.column_config.TextColumn("Employee"),
+        "Utilization": st.column_config.ProgressColumn(
+            "Utilization", format="{:.0%}", min_value=0.0, max_value=1.0
+        ),
+        "Role Split": st.column_config.TextColumn("Roles"),
+        "Support Details": st.column_config.TextColumn("Support work"),
+    }
+
+    column_order = list(dict.fromkeys([select_column] + [
+        column for column in overview_display_df.columns if column != select_column
+    ]))
+
+    disabled_columns = [
+        column for column in overview_display_df.columns if column != select_column
+    ]
+
+    edited_overview = st.data_editor(
+        overview_display_df,
         hide_index=True,
         use_container_width=True,
         num_rows="fixed",
-        column_config={
-            "Employee": st.column_config.TextColumn("Employee"),
-            "Utilization": st.column_config.ProgressColumn(
-                "Utilization", format="{:.0%}", min_value=0.0, max_value=1.0
-            ),
-            "Role Split": st.column_config.TextColumn("Roles"),
-            "Support Details": st.column_config.TextColumn("Support work"),
-        },
+        column_config=column_config,
+        column_order=column_order,
         disabled=disabled_columns,
         key="allocation_overview",
     )
 
-    stored_employee_uuid: Optional[str] = st.session_state.get("selected_employee_uuid")
     selected_employee_uuid: Optional[str] = None
-    if overview_df is not None and not overview_df.empty:
-        selection_state = st.session_state.get("allocation_overview", {})
-
-        def _extract_selected_rows(payload: Dict[str, Any]) -> List[int]:
-            if not isinstance(payload, dict):
-                return []
-            candidates: List[Any] = []
-            selection_info = payload.get("selection", {}) if isinstance(payload, dict) else {}
-            for key in ("rows", "row_indices"):
-                values = selection_info.get(key)
-                if values:
-                    candidates = values
-                    break
-            if not candidates:
-                fallback = payload.get("selected_rows")
-                if fallback:
-                    candidates = fallback
-            if isinstance(candidates, dict):
-                candidates = list(candidates.keys())
-            if isinstance(candidates, set):
-                candidates = list(candidates)
-            normalized: List[int] = []
-            for value in candidates:
-                if isinstance(value, (int, float)) and not pd.isna(value):
-                    normalized.append(int(value))
-                elif isinstance(value, str) and value.isdigit():
-                    normalized.append(int(value))
-            return normalized
-
-        selected_rows = _extract_selected_rows(selection_state)
+    if not edited_overview.empty and select_column in edited_overview.columns:
+        selected_rows = [
+            index
+            for index, is_selected in edited_overview[select_column].items()
+            if bool(is_selected)
+        ]
         if selected_rows:
-            row_position = selected_rows[0]
-            if 0 <= row_position < len(overview_df.index):
-                selected_employee_uuid = overview_df.index[row_position]
-                st.session_state["selected_employee_uuid"] = selected_employee_uuid
-        elif stored_employee_uuid and stored_employee_uuid in overview_df.index:
-            selected_employee_uuid = stored_employee_uuid
-        elif stored_employee_uuid and stored_employee_uuid not in overview_df.index:
-            st.session_state.pop("selected_employee_uuid", None)
-    elif stored_employee_uuid:
+            selected_employee_uuid = selected_rows[0]
+    if (
+        selected_employee_uuid is None
+        and stored_employee_uuid
+        and stored_employee_uuid in overview_df.index
+    ):
+        selected_employee_uuid = stored_employee_uuid
+
+    if selected_employee_uuid and selected_employee_uuid in overview_df.index:
+        st.session_state["selected_employee_uuid"] = selected_employee_uuid
+    else:
         st.session_state.pop("selected_employee_uuid", None)
 
     st.divider()
@@ -739,6 +751,26 @@ def render_expertise(
         st.info("Add employees and processes to manage expertise records.")
         return
 
+    show_active_only = st.checkbox(
+        "Show active expertise only",
+        value=True,
+        key="expertise_data_active_only",
+        help="Active assignments have started and have not yet ended as of today.",
+    )
+
+    today = date.today()
+
+    def _is_active(record: EmployeeExpertise) -> bool:
+        start = record.start_date
+        end = record.end_date
+        if not isinstance(start, date):
+            return False
+        if start > today:
+            return False
+        if end and end < today:
+            return False
+        return True
+
     employee_options = {
         employee.uuid: (
             f"{employee.first_name} {employee.last_name}".strip()
@@ -754,8 +786,24 @@ def render_expertise(
         process_label = process_options.get(record.get("process_uuid"), "Unknown process")
         return f"{employee_label} → {process_label}"
 
+    visible_items = (
+        [item for item in expertise if _is_active(item)] if show_active_only else expertise
+    )
+
+    def _save_expertise(updated_subset: List[EmployeeExpertise]) -> None:
+        visible_ids = {item.uuid for item in visible_items}
+        original_by_id = {item.uuid: item for item in expertise}
+
+        merged: List[EmployeeExpertise] = [
+            item for uuid, item in original_by_id.items() if uuid not in visible_ids
+        ]
+        merged.extend(updated_subset)
+
+        update_data("expertise_levels", merged)
+        expertise[:] = merged
+
     _smart_editor(
-        items=expertise,
+        items=visible_items,
         model_cls=EmployeeExpertise,
         dataset_key="expertise_levels",
         save_label="Save expertise",
@@ -776,6 +824,7 @@ def render_expertise(
         uuid_prefix="expertise",
         labeler=_label,
         date_columns=["start_date", "end_date"],
+        on_save=_save_expertise,
     )
 
 
