@@ -1530,23 +1530,23 @@ def _render_generic_dataset_tab(
 
 
 def _render_scenario_creator(
-    scenarios: List[Scenario], *, container: Optional[Any] = None, show_header: bool = True
+    scenarios: List[Scenario], *, container: Optional[Any] = None
 ) -> None:
     target = container or st
-    if show_header:
-        target.subheader("Create a scenario")
+    st.write("Create a scenario")
+
     with target.expander("Add a new scenario", expanded=not scenarios):
-        raw_name = target.text_input("Scenario name", key="scenario_creation_name")
+        raw_name = st.text_input("Scenario name", key="scenario_creation_name")
         new_name = raw_name.strip()
         create_disabled = not new_name
 
-        if target.button(
+        if st.button(
             "Create scenario",
             key="scenario_creation_button",
             disabled=create_disabled,
         ):
             if any(new_name.lower() == scenario.name.strip().lower() for scenario in scenarios):
-                target.error("A scenario with this name already exists.")
+                st.error("A scenario with this name already exists.")
                 return
 
             new_scenario = Scenario(
@@ -1556,7 +1556,7 @@ def _render_scenario_creator(
             )
             updated = scenarios + [new_scenario]
             update_data("scenarios", updated)
-            target.success(f"Scenario '{new_name}' created.")
+            st.success(f"Scenario '{new_name}' created.")
             st.rerun()
 
 
@@ -1827,28 +1827,24 @@ def main():
         st.info("Create a scenario to begin planning adjustments.")
         return
 
-    selection_column, creation_column = st.columns([3, 2])
+    selection_column, creation_column = st.columns([2, 1.5])
 
     with selection_column:
-        st.subheader("Scenario selection")
         scenario = _scenario_select(scenarios)
 
     with creation_column:
         _render_scenario_creator(
-            scenarios, container=creation_column, show_header=False
+            scenarios, container=creation_column
         )
 
     if scenario is None:
         st.info("Select a scenario to view its impact against the baseline.")
         return
 
-    st.markdown("---")
-
     modified_data = apply_scenario(data, scenario)
     label_maps = _build_label_maps(data, modified_data)
 
     with st.expander("Scenario adjustments", expanded=False):
-        st.subheader("Datasets")
         show_differences_only = st.toggle(
             "Show only rows with differences",
             value=False,
