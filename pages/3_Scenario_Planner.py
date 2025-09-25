@@ -599,7 +599,7 @@ def _summarize_support_assignments(
         process_label = process_labels.get(process_uuid, process_uuid or "—")
 
         if role_label and process_label:
-            base_label = f"{role_label} → {process_label}"
+            base_label = f"{process_label}"
         else:
             base_label = role_label or process_label or allocation_uuid or "—"
 
