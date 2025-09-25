@@ -642,7 +642,7 @@ def _summarize_employee_allocations(
     process_labels: Dict[str, str],
     show_differences_only: bool,
     support_role_ids: set[str] | None,
-) -> pd.DataFrame:
+) -> Tuple[pd.DataFrame, List[str]]:
     baseline = baseline_df.copy()
     scenario = scenario_df.copy()
     baseline_support = baseline_support_df.copy()
@@ -711,6 +711,7 @@ def _summarize_employee_allocations(
                 employee_ids.add(employee_id)
 
     summary_rows: List[Dict[str, Any]] = []
+    employee_order: List[str] = []
 
     def _collect_allocation_ids(
         rows: pd.DataFrame, *, support_only: bool
@@ -844,25 +845,26 @@ def _summarize_employee_allocations(
         summary_rows.append(
             {
                 "Employee": employee_label or employee_id or "—",
-                "Scenario allocations": scenario_roles,
-                "Scenario support allocations": scenario_support_summary,
-                "Scenario utilisation": scenario_total,
+                "Allocations": scenario_roles,
+                "Support allocations": scenario_support_summary,
+                "Utilisation": scenario_total,
                 DIFF_COLUMN_LABEL: diff_summary,
             }
         )
+        employee_order.append(employee_id)
 
     columns = [
         "Employee",
-        "Scenario allocations",
-        "Scenario support allocations",
-        "Scenario utilisation",
+        "Allocations",
+        "Support allocations",
+        "Utilisation",
         DIFF_COLUMN_LABEL,
     ]
 
     if not summary_rows:
-        return pd.DataFrame(columns=columns)
+        return pd.DataFrame(columns=columns), []
 
-    return pd.DataFrame(summary_rows, columns=columns)
+    return pd.DataFrame(summary_rows, columns=columns), employee_order
 
 
 def _render_allocation_tab(
@@ -931,7 +933,7 @@ def _render_allocation_tab(
         if column in summary_df.columns:
             summary_df[column] = summary_df[column].apply(_stringify_nullable)
 
-    summary_table = _summarize_employee_allocations(
+    summary_table, employee_order = _summarize_employee_allocations(
         baseline_df,
         scenario_df,
         baseline_support_df,
@@ -942,27 +944,6 @@ def _render_allocation_tab(
         show_differences_only,
         support_role_ids,
     )
-
-    if summary_table.empty:
-        st.info("No allocation data available for the selected criteria.")
-    else:
-        if "Scenario utilisation" in summary_table.columns:
-            summary_table["Scenario utilisation"] = pd.to_numeric(
-                summary_table["Scenario utilisation"], errors="coerce"
-            )
-        st.dataframe(
-            summary_table,
-            use_container_width=True,
-            hide_index=True,
-            column_config={
-                "Scenario utilisation": st.column_config.ProgressColumn(
-                    "Scenario utilisation", min_value=0.0, max_value=1.0, format="{:.0%}"
-                ),
-                DIFF_COLUMN_LABEL: st.column_config.TextColumn(
-                    DIFF_COLUMN_LABEL, disabled=True
-                ),
-            },
-        )
 
     available_employee_ids: set[str] = set()
     for df in (baseline_df, scenario_df):
@@ -978,25 +959,108 @@ def _render_allocation_tab(
             value for value in employees_frame["uuid"] if value
         )
 
-    if not available_employee_ids:
-        st.info("No role allocations available to edit.")
-        return
-
     def _label_for_employee(identifier: str) -> str:
         return employee_labels.get(identifier, identifier)
 
-    ordered_employee_ids = sorted(
+    missing_rows: List[Dict[str, Any]] = []
+    for identifier in sorted(
         available_employee_ids, key=lambda value: _label_for_employee(value).lower()
-    )
-    employee_options = {
-        _label_for_employee(identifier): identifier
-        for identifier in ordered_employee_ids
-    }
+    ):
+        if identifier in employee_order:
+            continue
+        missing_rows.append(
+            {
+                "Employee": _label_for_employee(identifier),
+                "Allocations": "—",
+                "Support allocations": "—",
+                "Utilisation": None,
+                DIFF_COLUMN_LABEL: "Unchanged",
+            }
+        )
+        employee_order.append(identifier)
 
-    selected_label = st.selectbox(
-        "Employee", list(employee_options.keys()), key=f"allocation_employee_{scenario.uuid}"
+    if missing_rows:
+        filler_df = pd.DataFrame(missing_rows, columns=summary_table.columns)
+        summary_table = pd.concat(
+            [summary_table, filler_df], ignore_index=True, sort=False
+        )
+
+    if summary_table.empty:
+        st.info("No allocation data available for the selected criteria.")
+        return
+
+    summary_table = summary_table.reset_index(drop=True)
+    if "Utilisation" in summary_table.columns:
+        summary_table["Utilisation"] = pd.to_numeric(
+            summary_table["Utilisation"], errors="coerce"
+        )
+
+    overview_key = f"scenario_allocation_overview_{scenario.uuid}"
+    selection_key = f"scenario_selected_employee_{scenario.uuid}"
+
+    st.data_editor(
+        summary_table,
+        use_container_width=True,
+        hide_index=True,
+        num_rows="fixed",
+        disabled=list(summary_table.columns),
+        column_config={
+            "Utilisation": st.column_config.ProgressColumn(
+                "Utilisation", min_value=0.0, max_value=1.0, format="{:.0%}"
+            ),
+            DIFF_COLUMN_LABEL: st.column_config.TextColumn(
+                DIFF_COLUMN_LABEL, disabled=True
+            ),
+        },
+        key=overview_key,
     )
-    selected_employee = employee_options[selected_label]
+
+    def _extract_selected_rows(payload: Dict[str, Any]) -> List[int]:
+        if not isinstance(payload, dict):
+            return []
+        candidates: List[Any] = []
+        selection_info = payload.get("selection", {}) if isinstance(payload, dict) else {}
+        for key in ("rows", "row_indices"):
+            values = selection_info.get(key)
+            if values:
+                candidates = values
+                break
+        if not candidates:
+            fallback = payload.get("selected_rows")
+            if fallback:
+                candidates = fallback
+        if isinstance(candidates, dict):
+            candidates = list(candidates.keys())
+        if isinstance(candidates, set):
+            candidates = list(candidates)
+        normalized: List[int] = []
+        for value in candidates:
+            if isinstance(value, (int, float)) and not pd.isna(value):
+                normalized.append(int(value))
+            elif isinstance(value, str) and value.isdigit():
+                normalized.append(int(value))
+        return normalized
+
+    selected_employee: Optional[str] = None
+    selection_state = st.session_state.get(overview_key, {})
+    selected_rows = _extract_selected_rows(selection_state)
+    if selected_rows:
+        row_position = selected_rows[0]
+        if 0 <= row_position < len(employee_order):
+            selected_employee = employee_order[row_position]
+            st.session_state[selection_key] = selected_employee
+
+    if selected_employee is None:
+        stored_employee = st.session_state.get(selection_key)
+        if stored_employee in employee_order:
+            selected_employee = stored_employee
+        elif employee_order:
+            selected_employee = employee_order[0]
+            st.session_state[selection_key] = selected_employee
+
+    if not selected_employee:
+        st.info("Select an employee in the overview table to manage allocations.")
+        return
 
     scenario_allocations = scenario_df.copy()
     baseline_allocations = baseline_df.copy()
@@ -1126,6 +1190,21 @@ def _render_allocation_tab(
                 [other_allocations, edited_df], ignore_index=True, sort=False
             )
             combined_allocations = combined_allocations.reindex(columns=base_columns)
+
+            if {
+                "percentage",
+                "employee_uuid",
+            }.issubset(combined_allocations.columns):
+                allocation_totals = (
+                    combined_allocations.dropna(subset=["employee_uuid"])
+                    .groupby("employee_uuid")["percentage"]
+                    .sum(min_count=1)
+                )
+                if (allocation_totals > 1.00001).any():
+                    st.error(
+                        "Allocation percentages cannot exceed 100% for an employee."
+                    )
+                    return
 
             new_adjustments = _calculate_dataset_adjustments(
                 dataset,
@@ -1297,6 +1376,18 @@ def _render_allocation_tab(
             )
             combined_support = combined_support.reindex(columns=support_base_columns)
 
+            if {"percentage", "allocation_uuid"}.issubset(combined_support.columns):
+                support_totals = (
+                    combined_support.dropna(subset=["allocation_uuid"])
+                    .groupby("allocation_uuid")["percentage"]
+                    .sum(min_count=1)
+                )
+                if (support_totals > 1.00001).any():
+                    st.error(
+                        "Support allocations cannot exceed 100% for a role allocation."
+                    )
+                    return
+
             new_adjustments = _calculate_dataset_adjustments(
                 support_dataset,
                 baseline_support_df,
@@ -1434,20 +1525,24 @@ def _render_generic_dataset_tab(
         st.rerun()
 
 
-def _render_scenario_creator(scenarios: List[Scenario]) -> None:
-    st.subheader("Create a scenario")
-    with st.expander("Add a new scenario", expanded=not scenarios):
-        raw_name = st.text_input("Scenario name", key="scenario_creation_name")
+def _render_scenario_creator(
+    scenarios: List[Scenario], *, container: Optional[Any] = None, show_header: bool = True
+) -> None:
+    target = container or st
+    if show_header:
+        target.subheader("Create a scenario")
+    with target.expander("Add a new scenario", expanded=not scenarios):
+        raw_name = target.text_input("Scenario name", key="scenario_creation_name")
         new_name = raw_name.strip()
         create_disabled = not new_name
 
-        if st.button(
+        if target.button(
             "Create scenario",
             key="scenario_creation_button",
             disabled=create_disabled,
         ):
             if any(new_name.lower() == scenario.name.strip().lower() for scenario in scenarios):
-                st.error("A scenario with this name already exists.")
+                target.error("A scenario with this name already exists.")
                 return
 
             new_scenario = Scenario(
@@ -1457,7 +1552,7 @@ def _render_scenario_creator(scenarios: List[Scenario]) -> None:
             )
             updated = scenarios + [new_scenario]
             update_data("scenarios", updated)
-            st.success(f"Scenario '{new_name}' created.")
+            target.success(f"Scenario '{new_name}' created.")
             st.rerun()
 
 
@@ -1520,8 +1615,29 @@ def _build_coverage_result(
     if "Coverage (Scenario)" not in merged.columns and "Coverage" in scenario.columns:
         merged = merged.rename(columns={"Coverage": "Coverage (Scenario)"})
 
+    numeric_columns = [
+        "Required (Baseline)",
+        "Coverage (Baseline)",
+        "Required (Scenario)",
+        "Coverage (Scenario)",
+    ]
+    for column in numeric_columns:
+        if column not in merged.columns:
+            merged[column] = 0.0
+        merged[column] = pd.to_numeric(merged[column], errors="coerce").fillna(0.0)
+
+    if display_columns:
+        aggregated = (
+            merged.groupby(display_columns, dropna=False)[numeric_columns]
+            .sum()
+            .reset_index()
+        )
+        aggregated = aggregated.sort_values(by=display_columns).reset_index(drop=True)
+    else:
+        aggregated = pd.DataFrame([merged[numeric_columns].sum().to_dict()])
+
     rows: List[Dict[str, object]] = []
-    for _, row in merged.iterrows():
+    for _, row in aggregated.iterrows():
         entry: Dict[str, object] = {}
         for column in display_columns:
             if column in row.index:
@@ -1702,14 +1818,21 @@ def main():
     data = get_data()
     scenarios = data.get("scenarios", [])
 
-    _render_scenario_creator(scenarios)
-
     if not scenarios:
+        _render_scenario_creator(scenarios)
         st.info("Create a scenario to begin planning adjustments.")
         return
 
-    st.subheader("Scenario selection")
-    scenario = _scenario_select(scenarios)
+    selection_column, creation_column = st.columns([3, 2])
+
+    with selection_column:
+        st.subheader("Scenario selection")
+        scenario = _scenario_select(scenarios)
+
+    with creation_column:
+        _render_scenario_creator(
+            scenarios, container=creation_column, show_header=False
+        )
 
     if scenario is None:
         st.info("Select a scenario to view its impact against the baseline.")
@@ -1717,64 +1840,85 @@ def main():
 
     st.markdown("---")
 
+    modified_data = apply_scenario(data, scenario)
+    label_maps = _build_label_maps(data, modified_data)
+
+    with st.expander("Scenario adjustments", expanded=False):
+        st.subheader("Datasets")
+        show_differences_only = st.toggle(
+            "Show only rows with differences",
+            value=False,
+            key=f"scenario_diff_only_{scenario.uuid}",
+        )
+
+        tabs = st.tabs([label for _, label in DISPLAY_DATASETS])
+        for (dataset, label), tab in zip(DISPLAY_DATASETS, tabs):
+            with tab:
+                baseline_df = _items_to_dataframe(data.get(dataset, [])).copy()
+                scenario_df = _items_to_dataframe(modified_data.get(dataset, [])).copy()
+
+                if dataset == "allocations":
+                    baseline_support_df = _items_to_dataframe(
+                        data.get("support_allocations", [])
+                    ).copy()
+                    scenario_support_df = _items_to_dataframe(
+                        modified_data.get("support_allocations", [])
+                    ).copy()
+                    _render_allocation_tab(
+                        scenario=scenario,
+                        baseline_df=baseline_df,
+                        scenario_df=scenario_df,
+                        baseline_support_df=baseline_support_df,
+                        scenario_support_df=scenario_support_df,
+                        baseline_data=data,
+                        modified_data=modified_data,
+                        dataset=dataset,
+                        label_maps=label_maps,
+                        show_differences_only=show_differences_only,
+                    )
+                else:
+                    _render_generic_dataset_tab(
+                        scenario=scenario,
+                        dataset=dataset,
+                        label=label,
+                        baseline_df=baseline_df,
+                        scenario_df=scenario_df,
+                        baseline_data=data,
+                        modified_data=modified_data,
+                        show_differences_only=show_differences_only,
+                        label_maps=label_maps,
+                    )
+
+    st.subheader("Scenario result")
+    controls = st.columns([1, 1])
+    with controls[0]:
+        group_choice = st.selectbox(
+            "Group by",
+            ["Office", "Region"],
+            index=0,
+            key=f"scenario_result_group_{scenario.uuid}",
+        )
+    with controls[1]:
+        unit_choice = st.selectbox(
+            "Unit",
+            ["Hours", "FTE"],
+            index=0,
+            key=f"scenario_result_unit_{scenario.uuid}",
+        )
+
     baseline_coverage = compute_theoretical_coverage(
         data,
         view="process",
-        group_by="office",
-        unit="hours",
+        group_by=group_choice.lower(),
+        unit=unit_choice.lower(),
     )
-
-    modified_data = apply_scenario(data, scenario)
-    label_maps = _build_label_maps(data, modified_data)
     scenario_coverage = compute_theoretical_coverage(
         modified_data,
         view="process",
-        group_by="office",
-        unit="hours",
+        group_by=group_choice.lower(),
+        unit=unit_choice.lower(),
     )
 
-    st.subheader("Scenario datasets")
-    show_differences_only = st.toggle("Show only rows with differences", value=False)
-
-    tabs = st.tabs([label for _, label in DISPLAY_DATASETS])
-    for (dataset, label), tab in zip(DISPLAY_DATASETS, tabs):
-        with tab:
-            baseline_df = _items_to_dataframe(data.get(dataset, [])).copy()
-            scenario_df = _items_to_dataframe(modified_data.get(dataset, [])).copy()
-
-            if dataset == "allocations":
-                baseline_support_df = _items_to_dataframe(
-                    data.get("support_allocations", [])
-                ).copy()
-                scenario_support_df = _items_to_dataframe(
-                    modified_data.get("support_allocations", [])
-                ).copy()
-                _render_allocation_tab(
-                    scenario=scenario,
-                    baseline_df=baseline_df,
-                    scenario_df=scenario_df,
-                    baseline_support_df=baseline_support_df,
-                    scenario_support_df=scenario_support_df,
-                    baseline_data=data,
-                    modified_data=modified_data,
-                    dataset=dataset,
-                    label_maps=label_maps,
-                    show_differences_only=show_differences_only,
-                )
-            else:
-                _render_generic_dataset_tab(
-                    scenario=scenario,
-                    dataset=dataset,
-                    label=label,
-                    baseline_df=baseline_df,
-                    scenario_df=scenario_df,
-                    baseline_data=data,
-                    modified_data=modified_data,
-                    show_differences_only=show_differences_only,
-                    label_maps=label_maps,
-                )
-
-    st.subheader("Scenario result")
     coverage_result = _build_coverage_result(baseline_coverage, scenario_coverage)
     styled_coverage = _style_coverage_result(coverage_result)
     st.dataframe(styled_coverage, use_container_width=True, hide_index=True)
