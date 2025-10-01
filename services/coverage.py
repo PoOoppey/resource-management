@@ -106,6 +106,15 @@ def compute_theoretical_coverage(data, view: str, group_by: str, unit: str) -> p
         )
 
     required_df = pd.DataFrame(required_rows)
+    if not required_df.empty:
+        group_columns = ["Group", "Region", "Process"]
+        if group_key == "office_uuid":
+            group_columns.insert(2, "Office")
+        required_df = (
+            required_df
+            .groupby(group_columns, as_index=False)["Required"]
+            .sum()
+        )
 
     contribution_rows = []
     support_lookup = defaultdict(list)
@@ -142,6 +151,15 @@ def compute_theoretical_coverage(data, view: str, group_by: str, unit: str) -> p
             )
 
     allocation_df = pd.DataFrame(contribution_rows)
+    if not allocation_df.empty:
+        group_columns = ["Group", "Region", "Process"]
+        if group_key == "office_uuid":
+            group_columns.insert(2, "Office")
+        allocation_df = (
+            allocation_df
+            .groupby(group_columns, as_index=False)["Allocated"]
+            .sum()
+        )
 
     merged = required_df.merge(
         allocation_df,
@@ -155,11 +173,16 @@ def compute_theoretical_coverage(data, view: str, group_by: str, unit: str) -> p
     merged = merged.rename(columns={"Required": "Required"})
 
     column_order = ["Region"]
+    sort_columns = ["Region"]
     if group_key == "office_uuid":
         column_order.append("Office")
+        sort_columns.append("Office")
     column_order.extend(["Process", "Required", "Coverage"])
+    sort_columns.append("Process")
 
-    return merged[column_order].sort_values(by=column_order[:-3])
+    merged = merged[column_order]
+
+    return merged.sort_values(by=sort_columns).reset_index(drop=True)
 
 
 def _week_range(start: date, end: date) -> List[date]:
