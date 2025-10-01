@@ -201,18 +201,20 @@ def compute_attendance_impact_details(
         if record.start_date <= week_end and record.end_date >= week_start
     ]
 
+    column_names = [
+        "Region",
+        "Office",
+        "Employee",
+        "Process",
+        "Reason",
+        "Start Date",
+        "End Date",
+        f"Adjusted Contribution ({unit.lower()})",
+        f"Base Contribution ({unit.lower()})",
+    ]
+
     if not impacted_records:
-        return pd.DataFrame(
-            columns=[
-                "Region",
-                "Office",
-                "Employee",
-                "Process",
-                "Reason",
-                f"Adjusted Contribution ({unit.lower()})",
-                f"Base Contribution ({unit.lower()})",
-            ]
-        )
+        return pd.DataFrame(columns=column_names)
 
     employees: List[Employee] = data.get("employees", [])
     allocations: List[Allocation] = data.get("allocations", [])
@@ -269,30 +271,26 @@ def compute_attendance_impact_details(
                         "Employee": f"{employee.first_name} {employee.last_name}",
                         "Process": process.name,
                         "Reason": record.type.value.title(),
+                        "Start Date": record.start_date.isoformat(),
+                        "End Date": record.end_date.isoformat(),
                         f"Adjusted Contribution ({unit.lower()})": adjusted_contribution,
                         f"Base Contribution ({unit.lower()})": base_contribution,
                     }
                 )
 
     if not detail_rows:
-        return pd.DataFrame(
-            columns=[
-                "Region",
-                "Office",
-                "Employee",
-                "Process",
-                "Reason",
-                f"Adjusted Contribution ({unit.lower()})",
-                f"Base Contribution ({unit.lower()})",
-            ]
-        )
+        return pd.DataFrame(columns=column_names)
 
     df = pd.DataFrame(detail_rows)
 
     if group_by.lower() != "office" and "Office" in df.columns:
         df = df.drop(columns=["Office"])
 
-    sort_columns = [col for col in ["Region", "Office", "Employee", "Process"] if col in df.columns]
+    sort_columns = [
+        col
+        for col in ["Region", "Office", "Employee", "Start Date", "Process"]
+        if col in df.columns
+    ]
     return df.sort_values(sort_columns).reset_index(drop=True)
 
 
