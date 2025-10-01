@@ -4,6 +4,7 @@
     "employee_uuid": "emp-1",
     "start_date": "2025-10-01",
     "end_date": "2025-10-07",
-    "type": "VACATION"
+    "type": "VACATION",
+    "effective_days": 7
   }
 ]
