@@ -152,14 +152,17 @@ def compute_theoretical_coverage(data, view: str, group_by: str, unit: str) -> p
     merged["Required"] = merged["Required"].fillna(0.0)
 
     merged = merged.rename(columns={"Allocated": "Coverage"})
-    merged = merged.rename(columns={"Required": "Required"})
 
-    column_order = ["Region"]
-    if group_key == "office_uuid":
-        column_order.append("Office")
-    column_order.extend(["Process", "Required", "Coverage"])
+    if group_by.lower() == "office":
+        column_order = ["Region", "Office", "Process", "Required", "Coverage"]
+        return merged[column_order].sort_values(by=["Region", "Office", "Process"])
 
-    return merged[column_order].sort_values(by=column_order[:-3])
+    aggregated = (
+        merged.groupby(["Region", "Process"], as_index=False)[["Required", "Coverage"]]
+        .sum()
+    )
+    column_order = ["Region", "Process", "Required", "Coverage"]
+    return aggregated[column_order].sort_values(by=["Region", "Process"])
 
 
 def _week_range(start: date, end: date) -> List[date]:
@@ -368,8 +371,10 @@ def compute_live_coverage(
                 process = process_lookup.get(support.process_uuid)
                 if not process:
                     continue
-                group = office.uuid if group_by.lower() == "office" else office.region.value
-                key = (office.region.value, office.name, process.name, group)
+                if group_by.lower() == "office":
+                    key = (office.region.value, office.name, process.name)
+                else:
+                    key = (office.region.value, process.name)
                 hours = _convert_unit(
                     _allocation_hours(employee, allocation, support) * factor,
                     unit,
@@ -379,12 +384,22 @@ def compute_live_coverage(
         column_label = format_week_label(week_start)
         week_labels.append(column_label)
         results[column_label] = 0.0
-        for (region, office_name, process_name, group), value in weekly_hours.items():
-            mask = results["Region"] == region
-            if "Office" in results.columns:
-                mask = mask & (results["Office"] == office_name)
-            mask = mask & (results["Process"] == process_name)
-            results.loc[mask, column_label] = value
+        for key, value in weekly_hours.items():
+            if group_by.lower() == "office":
+                region, office_name, process_name = key
+                mask = (
+                    (results["Region"] == region)
+                    & (results["Office"] == office_name)
+                    & (results["Process"] == process_name)
+                )
+            else:
+                region, process_name = key
+                mask = (
+                    (results["Region"] == region)
+                    & (results["Process"] == process_name)
+                )
+            if mask.any():
+                results.loc[mask, column_label] = value
 
     if display_mode.lower() in {"jira", "coverage+jira"}:
         # placeholder: data loader returns aggregated JIRA counts; align by process only
