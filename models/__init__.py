@@ -204,6 +204,22 @@ class AttendanceRecord:
     start_date: date
     end_date: date
     type: AttendanceType
+    effective_days: Optional[float] = None
+
+    def __post_init__(self) -> None:
+        span_days = (self.end_date - self.start_date).days + 1
+        if span_days <= 0:
+            raise ValueError("Attendance record end date must be on or after start date.")
+
+        if self.effective_days is None:
+            self.effective_days = float(span_days)
+        else:
+            self.effective_days = float(self.effective_days)
+
+        if self.effective_days < 0:
+            raise ValueError("Effective days cannot be negative.")
+        if self.effective_days > span_days:
+            self.effective_days = float(span_days)
 
     @classmethod
     def from_dict(cls, raw: Dict) -> "AttendanceRecord":
@@ -213,6 +229,7 @@ class AttendanceRecord:
             start_date=date.fromisoformat(raw["start_date"]),
             end_date=date.fromisoformat(raw["end_date"]),
             type=AttendanceType(raw["type"]),
+            effective_days=raw.get("effective_days"),
         )
 
 

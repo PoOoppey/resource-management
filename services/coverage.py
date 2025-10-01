@@ -18,6 +18,7 @@ from models import (
 )
 
 STANDARD_WEEKLY_HOURS = 40
+STANDARD_WORKING_DAYS = 5
 
 
 def _build_lookup(items: Iterable, key: str) -> Dict[str, object]:
@@ -209,6 +210,7 @@ def compute_attendance_impact_details(
                 "Employee",
                 "Process",
                 "Reason",
+                "Effective Days",
                 f"Adjusted Contribution ({unit.lower()})",
                 f"Base Contribution ({unit.lower()})",
             ]
@@ -244,6 +246,17 @@ def compute_attendance_impact_details(
             continue
 
         factor = _attendance_factor(attendance, employee.uuid, week_start)
+        overlap_start = max(record.start_date, week_start)
+        overlap_end = min(record.end_date, week_end)
+        overlap_days = (overlap_end - overlap_start).days + 1
+        span_days = (record.end_date - record.start_date).days + 1
+        if span_days <= 0:
+            continue
+        daily_effective = record.effective_days / span_days
+        effective_days_in_week = daily_effective * overlap_days
+        if effective_days_in_week <= 0:
+            continue
+
         allocations_for_employee = allocation_lookup.get(employee.uuid, [])
 
         for allocation in allocations_for_employee:
@@ -269,6 +282,7 @@ def compute_attendance_impact_details(
                         "Employee": f"{employee.first_name} {employee.last_name}",
                         "Process": process.name,
                         "Reason": record.type.value.title(),
+                        "Effective Days": round(effective_days_in_week, 2),
                         f"Adjusted Contribution ({unit.lower()})": adjusted_contribution,
                         f"Base Contribution ({unit.lower()})": base_contribution,
                     }
@@ -282,6 +296,7 @@ def compute_attendance_impact_details(
                 "Employee",
                 "Process",
                 "Reason",
+                "Effective Days",
                 f"Adjusted Contribution ({unit.lower()})",
                 f"Base Contribution ({unit.lower()})",
             ]
@@ -310,13 +325,30 @@ def format_week_label(week_start: date) -> str:
 
 def _attendance_factor(attendances: List[AttendanceRecord], employee_uuid: str, week_start: date) -> float:
     week_end = week_start + timedelta(days=6)
+    total_effective_days = 0.0
+
     for record in attendances:
         if record.employee_uuid != employee_uuid:
             continue
-        overlap = max(0, (min(record.end_date, week_end) - max(record.start_date, week_start)).days + 1)
-        if overlap > 0:
-            return 0.0
-    return 1.0
+
+        overlap_start = max(record.start_date, week_start)
+        overlap_end = min(record.end_date, week_end)
+        if overlap_start > overlap_end:
+            continue
+
+        overlap_days = (overlap_end - overlap_start).days + 1
+        span_days = (record.end_date - record.start_date).days + 1
+        if span_days <= 0:
+            continue
+
+        daily_effective = record.effective_days / span_days
+        total_effective_days += daily_effective * overlap_days
+
+    if total_effective_days <= 0:
+        return 1.0
+
+    fraction_absent = min(total_effective_days / STANDARD_WORKING_DAYS, 1.0)
+    return max(0.0, 1.0 - fraction_absent)
 
 
 def compute_live_coverage(
