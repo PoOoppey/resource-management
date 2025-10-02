@@ -59,32 +59,93 @@ def _render_matrix(filtered_df: pd.DataFrame) -> None:
         st.info("No expertise assignments match the current filters.")
         return
 
+    column_medians = matrix_df.median(axis=0, skipna=True)
+    deviation_df = matrix_df.subtract(column_medians, axis="columns")
+    max_abs_deviation = deviation_df.abs().max().max()
+    if pd.isna(max_abs_deviation) or max_abs_deviation == 0:
+        max_abs_deviation = 1.0
+
+    def _style_missing(row: pd.Series) -> list[str]:
+        return ["background-color: #f6f6f9" if pd.isna(value) else "" for value in row]
+
     matrix_styler = (
         matrix_df.style.format(lambda value: "" if pd.isna(value) else f"{int(value)}")
-        .background_gradient(cmap="GnBu", vmin=1, vmax=5)
+        .background_gradient(
+            cmap="PiYG",
+            axis=None,
+            gmap=deviation_df,
+            vmin=-max_abs_deviation,
+            vmax=max_abs_deviation,
+        )
+        .apply(_style_missing, axis=1)
     )
     st.dataframe(matrix_styler, use_container_width=True)
+    st.caption("Cell colors show the deviation from the process median expertise level.")
+
+    process_summary = (
+        filtered_df.groupby("Process")
+        .agg(
+            Employees=("Employee UUID", pd.Series.nunique),
+            Assignments=("Process", "count"),
+            Median_level=("Level", "median"),
+        )
+        .rename_axis("Process")
+        .sort_values("Median_level", ascending=False)
+    )
+    process_summary["Median_level"] = process_summary["Median_level"].round(2)
+    process_summary[["Employees", "Assignments"]] = process_summary[["Employees", "Assignments"]].fillna(0).astype(int)
+
+    def _merge_regions(values: pd.Series) -> str:
+        unique_regions = sorted({value for value in values if isinstance(value, str) and value})
+        return ", ".join(unique_regions)
+
+    employee_summary = (
+        labeled_df.groupby("Employee label")
+        .agg(
+            Regions=("Region", _merge_regions),
+            Processes=("Process UUID", lambda series: series.dropna().nunique()),
+            Assignments=("Process", "count"),
+            Median_level=("Level", "median"),
+        )
+        .rename_axis("Employee")
+        .sort_values(["Median_level", "Assignments"], ascending=[False, False])
+    )
+    employee_summary["Median_level"] = employee_summary["Median_level"].round(2)
+    employee_summary[["Processes", "Assignments"]] = employee_summary[["Processes", "Assignments"]].fillna(0).astype(int)
+
+    insight_columns = st.columns(2)
+    with insight_columns[0]:
+        st.markdown("#### Process overview")
+        st.dataframe(process_summary, use_container_width=True)
+    with insight_columns[1]:
+        st.markdown("#### Employee overview")
+        st.dataframe(employee_summary, use_container_width=True)
 
 
 def _render_process_summary(filtered_df: pd.DataFrame) -> None:
     process_summary = (
         filtered_df.groupby("Process")
         .agg(
+            Employees=("Employee UUID", pd.Series.nunique),
             Active_assignments=("Active", "sum"),
             Total_assignments=("Active", "count"),
+            Median_level=("Level", "median"),
             Average_level=("Level", "mean"),
         )
         .sort_index()
     )
     process_summary["Average_level"] = process_summary["Average_level"].round(2)
+    process_summary["Median_level"] = process_summary["Median_level"].round(2)
     process_summary = process_summary.rename(
         columns={
+            "Employees": "Employees",
             "Active_assignments": "Active",
             "Total_assignments": "Total",
             "Average_level": "Avg. level",
+            "Median_level": "Median level",
         }
     )
-    process_summary[["Active", "Total"]] = process_summary[["Active", "Total"]].astype(int)
+    process_summary[["Employees", "Active", "Total"]] = process_summary[["Employees", "Active", "Total"]].fillna(0).astype(int)
     process_summary = process_summary.reset_index()
 
     st.dataframe(process_summary, use_container_width=True)
@@ -236,11 +297,21 @@ def render() -> None:
             mask = mask | filtered_df[column].fillna("").astype(str).str.lower().str.contains(lowered)
         filtered_df = filtered_df[mask]
 
-    summary_levels = filtered_df.groupby("Level").size()
-    summary_columns = st.columns(5)
-    for idx, level in enumerate(range(1, 6)):
-        count = int(summary_levels.get(level, 0))
-        summary_columns[idx].metric(f"Level {level}", f"{count}")
+    summary_columns = st.columns(4)
+    summary_columns[0].metric("Assignments", f"{len(filtered_df)}")
+    summary_columns[1].metric(
+        "Employees",
+        f"{filtered_df['Employee UUID'].nunique()}",
+    )
+    summary_columns[2].metric(
+        "Processes",
+        f"{filtered_df['Process UUID'].nunique()}",
+    )
+    median_level = filtered_df["Level"].median()
+    summary_columns[3].metric(
+        "Median level",
+        "—" if pd.isna(median_level) else f"{median_level:.1f}",
+    )
 
     if selected_employee_uuid and selected_process_uuid:
         employee_label = employee_lookup.get(selected_employee_uuid, "Selected employee")
